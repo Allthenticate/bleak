@@ -1,21 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-BLE Client for BlueZ on Linux
-"""
 import logging
 import asyncio
 import os
 import re
 import subprocess
 import uuid
-import warnings
 from asyncio import Future
 from functools import wraps, partial
 from typing import Callable, Any, Union
 
 from twisted.internet.error import ConnectionDone
 
-from bleak.backends.device import BLEDevice
 from bleak.backends.service import BleakGATTServiceCollection
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakError
@@ -40,30 +35,28 @@ class BleakClientBlueZDBus(BaseBleakClient):
     Implemented by using the `BlueZ DBUS API <https://docs.ubuntu.com/core/en/stacks/bluetooth/bluez/docs/reference/dbus-api>`_.
 
     Args:
-        address_or_ble_device (`BLEDevice` or str): The Bluetooth address of the BLE peripheral to connect to or the `BLEDevice` object representing it.
+        address (str): The  address of the BLE peripheral to connect to.
 
     Keyword Args:
         timeout (float): Timeout for required ``BleakScanner.find_device_by_address`` call. Defaults to 10.0.
 
     """
 
-    def __init__(self, address_or_ble_device: Union[BLEDevice, str], **kwargs):
-        super(BleakClientBlueZDBus, self).__init__(address_or_ble_device, **kwargs)
+    def __init__(self, address, **kwargs):
+        super(BleakClientBlueZDBus, self).__init__(address, **kwargs)
         self.device = kwargs.get("device") if kwargs.get("device") else "hci0"
-        self.address = address_or_ble_device
+        self.address = address
 
         # Backend specific, TXDBus objects and data
-        if isinstance(address_or_ble_device, BLEDevice):
-            self._device_path = address_or_ble_device.details["path"]
-        else:
-            self._device_path = None
+        self._device_path = None
         self._bus = None
         self._reactor = None
         self._rules = {}
         self._subscriptions = list()
 
-        # This maps DBus paths of GATT Characteristics to their BLE handles.
-        self._char_path_to_handle = {}
+        self._disconnected_callback = None
+
+        self._char_path_to_uuid = {}
 
         # We need to know BlueZ version since battery level characteristic
         # are stored in a separate DBus interface in the BlueZ >= 5.48.
@@ -73,6 +66,34 @@ class BleakClientBlueZDBus(BaseBleakClient):
         self._bluez_version = tuple(map(int, s.groups()))
 
     # Connectivity methods
+
+    def set_disconnected_callback(
+        self, callback: Callable[[BaseBleakClient, Future], None], **kwargs
+    ) -> None:
+        """Set the disconnected callback.
+
+        The callback will be called on DBus PropChanged event with
+        the 'Connected' key set to False.
+
+        A disconnect callback must accept two positional arguments,
+        the BleakClient and the Future that called it.
+
+        Example:
+
+        .. code-block::python
+
+            async with BleakClient(mac_addr) as client:
+                def disconnect_callback(client, future):
+                    print(f"Disconnected callback called on {client}!")
+
+                client.set_disconnected_callback(disconnect_callback)
+
+        Args:
+            callback: callback to be called on disconnection.
+
+        """
+
+        self._disconnected_callback = callback
 
     async def connect(self, **kwargs) -> bool:
         """Connect to the specified GATT server.
@@ -86,18 +107,16 @@ class BleakClientBlueZDBus(BaseBleakClient):
         """
         # A Discover must have been run before connecting to any devices.
         # Find the desired device before trying to connect.
-        if self._device_path is None:
-            timeout = kwargs.get("timeout", self._timeout)
-            device = await BleakScannerBlueZDBus.find_device_by_address(
-                self.address, timeout=timeout, device=self.device
-            )
+        timeout = kwargs.get("timeout", self._timeout)
+        device = await BleakScannerBlueZDBus.find_device_by_address(
+            self.address, timeout=timeout, device=self.device)
 
-            if device:
-                self._device_path = device.details["path"]
-            else:
-                raise BleakError(
-                    "Device with address {0} was not found.".format(self.address)
-                )
+        if device:
+            self._device_path = device.details["path"]
+        else:
+            raise BleakError(
+                "Device with address {0} was not found.".format(self.address)
+            )
 
         loop = asyncio.get_event_loop()
         self._reactor = get_reactor(loop)
@@ -127,8 +146,9 @@ class BleakClientBlueZDBus(BaseBleakClient):
             await self._bus.callRemote(
                 self._device_path,
                 "Connect",
-                interface=defs.DEVICE_INTERFACE,
-                destination=defs.BLUEZ_SERVICE,
+                interface="org.bluez.Device1",
+                destination="org.bluez",
+                timeout=timeout
             ).asFuture(loop)
         except RemoteError as e:
             await self._cleanup_all()
@@ -210,7 +230,6 @@ class BleakClientBlueZDBus(BaseBleakClient):
         Free all the allocated resource in DBus and Twisted. Use this method to
         eventually cleanup all otherwise leaked resources.
         """
-        self._char_path_to_handle.clear()
         await self._cleanup_notifications()
         await self._cleanup_dbus_resources()
 
@@ -251,80 +270,6 @@ class BleakClientBlueZDBus(BaseBleakClient):
 
         return is_disconnected
 
-    async def pair(self, *args, **kwargs) -> bool:
-        """Pair with the peripheral.
-
-        You can use ConnectDevice method if you already know the MAC address of the device.
-        Else you need to StartDiscovery, Trust, Pair and Connect in sequence.
-
-        Returns:
-            Boolean regarding success of pairing.
-
-        """
-        loop = asyncio.get_event_loop()
-
-        # See if it is already paired.
-        is_paired = await self._bus.callRemote(
-            self._device_path,
-            "Get",
-            interface=defs.PROPERTIES_INTERFACE,
-            destination=defs.BLUEZ_SERVICE,
-            signature="ss",
-            body=[defs.DEVICE_INTERFACE, "Paired"],
-            returnSignature="v",
-        ).asFuture(asyncio.get_event_loop())
-        if is_paired:
-            return is_paired
-
-        # Set device as trusted.
-        await self._bus.callRemote(
-            self._device_path,
-            "Set",
-            interface=defs.PROPERTIES_INTERFACE,
-            destination=defs.BLUEZ_SERVICE,
-            signature="ssv",
-            body=[defs.DEVICE_INTERFACE, "Trusted", True],
-            returnSignature="",
-        ).asFuture(asyncio.get_event_loop())
-
-        logger.debug(
-            "Pairing to BLE device @ {0} with {1}".format(self.address, self.device)
-        )
-        try:
-            await self._bus.callRemote(
-                self._device_path,
-                "Pair",
-                interface=defs.DEVICE_INTERFACE,
-                destination=defs.BLUEZ_SERVICE,
-            ).asFuture(loop)
-        except RemoteError as e:
-            await self._cleanup_all()
-            raise BleakError(
-                "Device with address {0} could not be paired with.".format(self.address)
-            )
-
-        return await self._bus.callRemote(
-            self._device_path,
-            "Get",
-            interface=defs.PROPERTIES_INTERFACE,
-            destination=defs.BLUEZ_SERVICE,
-            signature="ss",
-            body=[defs.DEVICE_INTERFACE, "Paired"],
-            returnSignature="v",
-        ).asFuture(asyncio.get_event_loop())
-
-    async def unpair(self) -> bool:
-        """Unpair with the peripheral.
-
-        Returns:
-            Boolean regarding success of unpairing.
-
-        """
-        warnings.warn(
-            "Unpairing is seemingly unavailable in the BlueZ DBus API at the moment."
-        )
-        return False
-
     async def is_connected(self) -> bool:
         """Check connection status between this client and the server.
 
@@ -354,6 +299,7 @@ class BleakClientBlueZDBus(BaseBleakClient):
             # Do not want to silence unknown errors. Send this upwards.
             raise
         return is_connected
+
 
     # GATT services methods
 
@@ -410,9 +356,7 @@ class BleakClientBlueZDBus(BaseBleakClient):
             self.services.add_characteristic(
                 BleakGATTCharacteristicBlueZDBus(char, object_path, _service[0].uuid)
             )
-
-            # D-Bus object path contains handle as last 4 characters of 'charYYYY'
-            self._char_path_to_handle[object_path] = int(object_path[-4:], 16)
+            self._char_path_to_uuid[object_path] = char.get("UUID")
 
         for desc, object_path in _descs:
             _characteristic = list(
@@ -552,16 +496,14 @@ class BleakClientBlueZDBus(BaseBleakClient):
     ) -> None:
         """Perform a write operation on the specified GATT characteristic.
 
-        .. note::
-
-            The version check below is for the "type" option to the
-            "Characteristic.WriteValue" method that was added to `Bluez in 5.51
-            <https://git.kernel.org/pub/scm/bluetooth/bluez.git/commit?id=fa9473bcc48417d69cc9ef81d41a72b18e34a55a>`_
-            Before that commit, ``Characteristic.WriteValue`` was only "Write with
-            response". ``Characteristic.AcquireWrite`` was `added in Bluez 5.46
-            <https://git.kernel.org/pub/scm/bluetooth/bluez.git/commit/doc/gatt-api.txt?id=f59f3dedb2c79a75e51a3a0d27e2ae06fefc603e>`_
-            which can be used to "Write without response", but for older versions
-            of Bluez, it is not possible to "Write without response".
+        NB: the version check below is for the "type" option to the
+        "Characteristic.WriteValue" method that was added to Bluez in 5.51
+        https://git.kernel.org/pub/scm/bluetooth/bluez.git/commit?id=fa9473bcc48417d69cc9ef81d41a72b18e34a55a
+        Before that commit, "Characteristic.WriteValue" was only "Write with
+        response". "Characteristic.AcquireWrite" was added in Bluez 5.46
+        https://git.kernel.org/pub/scm/bluetooth/bluez.git/commit/doc/gatt-api.txt?id=f59f3dedb2c79a75e51a3a0d27e2ae06fefc603e
+        which can be used to "Write without response", but for older versions
+        of Bluez, it is not possible to "Write without response".
 
         Args:
             char_specifier (BleakGATTCharacteristicBlueZDBus, int, str or UUID): The characteristic to write
@@ -664,17 +606,17 @@ class BleakClientBlueZDBus(BaseBleakClient):
     async def start_notify(
         self,
         char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, uuid.UUID],
-        callback: Callable[[int, bytearray], None],
+        callback: Callable[[str, Any], Any],
         **kwargs
     ) -> None:
         """Activate notifications/indications on a characteristic.
 
-        Callbacks must accept two inputs. The first will be a integer handle of the characteristic generating the
-        data and the second will be a ``bytearray`` containing the data sent from the connected server.
+        Callbacks must accept two inputs. The first will be a uuid string
+        object and the second will be a bytearray.
 
         .. code-block:: python
 
-            def callback(sender: int, data: bytearray):
+            def callback(sender, data):
                 print(f"{sender}: {data}")
             client.start_notify(char_uuid, callback)
 
@@ -729,20 +671,19 @@ class BleakClientBlueZDBus(BaseBleakClient):
             self._notification_callbacks[
                 characteristic.path
             ] = _data_notification_wrapper(
-                callback, self._char_path_to_handle
+                callback, self._char_path_to_uuid
             )  # noqa | E123 error in flake8...
         else:
             self._notification_callbacks[
                 characteristic.path
             ] = _regular_notification_wrapper(
-                callback, self._char_path_to_handle
+                callback, self._char_path_to_uuid
             )  # noqa | E123 error in flake8...
 
         self._subscriptions.append(characteristic.handle)
 
     async def stop_notify(
-        self,
-        char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, uuid.UUID],
+        self, char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, uuid.UUID]
     ) -> None:
         """Deactivate notification/indication on a specified characteristic.
 
@@ -775,8 +716,7 @@ class BleakClientBlueZDBus(BaseBleakClient):
     # DBUS introspection method for characteristics.
 
     async def get_all_for_characteristic(
-        self,
-        char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, uuid.UUID],
+        self, char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, uuid.UUID]
     ) -> dict:
         """Get all properties for a characteristic.
 
