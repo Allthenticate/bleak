@@ -1,5 +1,5 @@
-import logging
 import asyncio
+import logging
 import pathlib
 from typing import Callable, Union, List
 
@@ -7,7 +7,7 @@ from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDe
 from bleak.backends.corebluetooth.utils import cb_uuid_to_str
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import BaseBleakScanner
-
+from bleak.exc import BleakError
 
 logger = logging.getLogger(__name__)
 _here = pathlib.Path(__file__).parent
@@ -40,10 +40,70 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
     async def start(self):
         self._identifiers = {}
 
+        def safe_list_get(list: list, idx: int, default):
+            """
+            Returns an index from a list safely similar to .get() with dicts
+            """
+            try:
+                return repr(list[idx]).lower()
+            except IndexError:
+                return default
+
+        def callback_dict_breakdown(data) -> Union[None, dict]:
+            """
+            This function parses the __NSDictionaryM or __NSSingleEntryDictionry
+            I object passed as data into a more user-friendly dictionary which
+            is returned, if data is None, or if an exception is raised during
+            parsing, None is returned
+            """
+            if data:
+                try:
+                    _service_dict_key = data.allKeys()[0]
+                    _service_dict_data = data.objectForKey_(_service_dict_key)
+                    return {str(_service_dict_key): str(_service_dict_data)}
+                except Exception:
+                    return None
+            else:
+                return None
+
         def callback(p, a, r):
             # update identifiers for scanned device
             self._identifiers.setdefault(p.identifier(), {}).update(a)
             if self._callback:
+            self._identifiers[p.identifier()] = a
+
+            service_data_dict = a.get("kCBAdvDataServiceData", {})
+            apple_manufacturer_dict = a.get("kCBAdvDataAppleMfgData", {})
+            manufacturer_data_str = str(
+                a.get("kCBAdvDataManufacturerData", ""))
+
+            callback_data = {"uuid": p.identifier().UUIDString(),
+                             "name": p.name(),
+                             "rssi": r,
+                             "advertisement_data":
+                                 {
+                                     "data_channel_connectable": a.get(
+                                         "kCBAdvDataIsConnectable"),
+                                     "data_channel": a.get(
+                                         "kCBAdvDataChannel"),
+                                     "manufacturer_data": manufacturer_data_str,
+                                     "data_tx_power_level": a.get(
+                                         "kCBAdvDataTxPowerLevel"),
+                                     "apple_manufacturer_data": callback_dict_breakdown(
+                                         apple_manufacturer_dict),
+                                     "local_name": a.get(
+                                         "kCBAdvDataLocalName"),
+                                     "service_data": callback_dict_breakdown(
+                                         service_data_dict),
+                                     "service_uuid": safe_list_get(
+                                         a.get("kCBAdvDataServiceUUIDs", []),
+                                         0, None)
+                                 }
+                             }
+
+            try:
+                self._callback(p, a, r, callback_data)
+            except:
                 self._callback(p, a, r)
 
         self._manager.callbacks[id(self)] = callback
