@@ -237,7 +237,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         stop_scanning_event = asyncio.Event()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(message):
+        def stop_if_detected(message, *args):
             if any(
                 device.get("Address", "").lower() == device_identifier
                 for device in scanner._devices.values()
@@ -322,5 +322,9 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
                 self._callback(message, None, None, callback_data)
             except Exception:
                 logger.exception("Exception caught unpacking callback message, returning defaults...")
-                self._callback(message, None, None, callback_data)
+                try:
+                    self._callback(message, None, None, callback_data)
+                except:
+                    # This is for the stop_if_detected
+                    self._callback(message)
 
