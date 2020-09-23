@@ -322,9 +322,5 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
                 self._callback(message, None, None, callback_data)
             except Exception:
                 logger.exception("Exception caught unpacking callback message, returning defaults...")
-                try:
-                    self._callback(message, None, None, callback_data)
-                except:
-                    # This is for the stop_if_detected
-                    self._callback(message)
+                self._callback(message, None, None, callback_data)
 
