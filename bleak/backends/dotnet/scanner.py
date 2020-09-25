@@ -1,8 +1,10 @@
+import inspect
 import logging
 import asyncio
 import pathlib
 from typing import Callable, Union, List
 
+from bleak import get_reference_callback_format
 from bleak.backends.device import BLEDevice
 from bleak.backends.dotnet.utils import BleakDataReader
 from bleak.backends.scanner import BaseBleakScanner
@@ -89,7 +91,34 @@ class BleakScannerDotNet(BaseBleakScanner):
                 if event_args.BluetoothAddress not in self._devices:
                     self._devices[event_args.BluetoothAddress] = event_args
         if self._callback is not None:
-            self._callback(sender, event_args)
+            callback_data = get_reference_callback_format()
+
+            uuids = []
+            for u in e.Advertisement.ServiceUuids:
+                uuids.append(u.ToString())
+            data = {}
+            for m in e.Advertisement.ManufacturerData:
+                md = IBuffer(m.Data)
+                b = Array.CreateInstance(Byte, md.Length)
+                reader = DataReader.FromBuffer(md)
+                reader.ReadBytes(b)
+                datalist = []
+                datalist[:] = bytes(b).hex()
+                data[m.CompanyId] = datalist
+
+            try:
+                callback_data['address'] = e.BluetoothAddress or None
+                callback_data['name'] = e.Advertisement.LocalName or None
+                callback_data['data_channel'] = None
+                callback_data['manufacturer_data'] = data
+                callback_data['service_data'] = None
+                callback_data['service_uuid'] = uuids
+                callback_data['rssi'] = e.RawSignalStrengthInDBm or None
+
+                self._callback(sender, e, None, callback_data)
+            except Exception:
+                logger.exception("Exception caught unpacking callback message, returning defaults...")
+                self._callback(sender, e, None, callback_data)
 
     def _stopped_handler(self, sender, event_args):
         if sender == self.watcher:
@@ -260,7 +289,7 @@ class BleakScannerDotNet(BaseBleakScanner):
         stop_scanning_event = asyncio.Event()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(sender, event_args):
+        def stop_if_detected(sender, event_args, *args):
             if event_args.BluetoothAddress == ulong_id:
                 loop.call_soon_threadsafe(stop_scanning_event.set)
 
