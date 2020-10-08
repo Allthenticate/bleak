@@ -7,7 +7,7 @@ from bleak.backends.scanner import BaseBleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.bluezdbus import defs, get_reactor
 from bleak.backends.bluezdbus.utils import validate_mac_address
-
+from bleak import get_reference_callback_format
 from txdbus import client
 
 logger = logging.getLogger(__name__)
@@ -238,7 +238,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         stop_scanning_event = asyncio.Event()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(message):
+        def stop_if_detected(message, *args):
             if any(
                 device.get("Address", "").lower() == device_identifier
                 for device in scanner._devices.values()
@@ -305,4 +305,27 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         )
 
         if self._callback is not None:
-            self._callback(message)
+            callback_data = get_reference_callback_format()
+
+            try:
+                device_dict = message.body[1]
+                if isinstance(device_dict, dict) and 'org.bluez.Device1' in device_dict:
+                    device_dict = device_dict['org.bluez.Device1']
+
+                callback_data['address'] = device_dict.get('Address', None)
+                callback_data['name'] = device_dict.get('Alias', device_dict.get('Name', None))
+                callback_data['data_channel'] = device_dict.get('Adaptor', None)
+                callback_data['manufacturer_data'] = device_dict.get('ManufacturerData', {})
+                callback_data['service_data'] = device_dict.get('ServiceData', None)
+                callback_data['service_uuid'] = device_dict.get('UUIDs', [])
+                callback_data['rssi'] = device_dict.get('RSSI', None)
+
+                self._callback(message, None, None, callback_data)
+            except Exception:
+                logger.exception("Exception caught unpacking callback message, returning defaults...")
+                try:
+                    self._callback(message, None, None, callback_data)
+                except:
+                    # This is for the stop_if_detected
+                    self._callback(message)
+

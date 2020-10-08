@@ -1,14 +1,14 @@
-import logging
 import asyncio
+import logging
 import pathlib
-import uuid
-from typing import Callable, Any, Union, List
+from typing import Callable, Union, List
 
-from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
+from bleak import get_reference_callback_format
+from bleak.backends.corebluetooth.CentralManagerDelegate import \
+    CentralManagerDelegate
 from bleak.backends.device import BLEDevice
-from bleak.exc import BleakError
 from bleak.backends.scanner import BaseBleakScanner
-
+from bleak.exc import BleakError
 
 logger = logging.getLogger(__name__)
 _here = pathlib.Path(__file__).parent
@@ -46,10 +46,61 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
 
         self._identifiers = {}
 
+        def safe_list_get(list: list, idx: int, default):
+            """
+            Returns an index from a list safely similar to .get() with dicts
+            """
+            try:
+                return repr(list[idx]).lower()
+            except IndexError:
+                return default
+
+        def callback_dict_breakdown(data) -> Union[None, dict]:
+            """
+            This function parses the __NSDictionaryM or __NSSingleEntryDictionry
+            I object passed as data into a more user-friendly dictionary which
+            is returned, if data is None, or if an exception is raised during
+            parsing, None is returned
+            """
+            if data:
+                try:
+                    _service_dict_key = data.allKeys()[0]
+                    _service_dict_data = data.objectForKey_(_service_dict_key)
+                    return {str(_service_dict_key): str(_service_dict_data)}
+                except Exception:
+                    return None
+            else:
+                return None
+
         def callback(p, a, r):
             self._identifiers[p.identifier()] = a
-            if self._callback:
-                self._callback(p, a, r)
+
+            service_data_dict = a.get("kCBAdvDataServiceData", {})
+            manufacturer_data_raw = list(
+                a.get("kCBAdvDataManufacturerData", ""))
+
+            manufacturer_data = {}
+            if manufacturer_data_raw:
+                manufacturer_data[manufacturer_data_raw[0]] = \
+                    manufacturer_data_raw[2:]
+
+            callback_data = get_reference_callback_format()
+
+            callback_data['address'] = p.identifier().UUIDString()
+            callback_data['name'] = p.name()
+
+            callback_data['data_channel'] = a.get("kCBAdvDataChannel")
+            callback_data['manufacturer_data'] = manufacturer_data
+            callback_data['service_data'] = callback_dict_breakdown(
+                                            service_data_dict)
+            callback_data['service_uuid'] = safe_list_get(
+                a.get("kCBAdvDataServiceUUIDs", []), 0, []  )
+            callback_data['rssi'] = r
+
+            try:
+                self._callback(p, a, r, callback_data)
+            except:
+                self._callback(p, a, r, {})
 
         self._manager.callbacks[id(self)] = callback
         self._manager.start_scan({})
@@ -149,7 +200,7 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
         device_identifier = device_identifier.lower()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(peripheral, advertisement_data, rssi):
+        def stop_if_detected(peripheral, advertisement_data, rssi, *args):
             if str(peripheral.identifier().UUIDString()).lower() == device_identifier:
                 loop.call_soon_threadsafe(stop_scanning_event.set)
 
