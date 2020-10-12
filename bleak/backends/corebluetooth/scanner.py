@@ -4,8 +4,7 @@ import pathlib
 from typing import Callable, Union, List
 
 from bleak import get_reference_callback_format
-from bleak.backends.corebluetooth.CentralManagerDelegate import \
-    CentralManagerDelegate
+from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import BaseBleakScanner
 from bleak.exc import BleakError
@@ -86,39 +85,52 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
             try:
                 manufacturer_data = {}
                 if manufacturer_data_raw:
-                    manufacturer_data[manufacturer_data_raw[0]] = manufacturer_data_raw[2:]
+                    manufacturer_data[manufacturer_data_raw[0]] = manufacturer_data_raw[
+                        2:
+                    ]
             except Exception:
-                logger.exception("Exception caught while parsing manufacturer data upon discovery")
+                logger.exception(
+                    "Exception caught while parsing manufacturer data upon" " discovery"
+                )
                 manufacturer_data = {}
 
             # Process service data into a nicer format
             try:
                 service_data = callback_dict_breakdown(service_data_dict_raw)
             except Exception:
-                logger.exception("Exception caught while parsing service data upon discovery")
+                logger.exception(
+                    "Exception caught while parsing service data upon " "discovery"
+                )
                 service_data = {}
 
             # Process service uuids into a list
             try:
-                service_uuids = safe_list_get(a.get("kCBAdvDataServiceUUIDs", []), 0, [])
+                service_uuids = safe_list_get(
+                    a.get("kCBAdvDataServiceUUIDs", []), 0, []
+                )
             except Exception:
-                logger.exception("Exception caught while parsing service uuids upon discovery")
+                logger.exception(
+                    "Exception caught while parsing service uuids upon " "discovery"
+                )
                 service_uuids = []
 
             try:
                 # Populate the callback dictionary
-                callback_data['address'] = p.identifier().UUIDString()
-                callback_data['name'] = p.name()
-                callback_data['data_channel'] = a.get("kCBAdvDataChannel")
-                callback_data['manufacturer_data'] = manufacturer_data
-                callback_data['service_data'] = service_data
-                callback_data['service_uuid'] = service_uuids
-                callback_data['rssi'] = r
-                callback_data['platform_data'] = (p, a, r)
+                callback_data["address"] = p.identifier().UUIDString()
+                callback_data["name"] = p.name()
+                callback_data["data_channel"] = a.get("kCBAdvDataChannel")
+                callback_data["manufacturer_data"] = manufacturer_data
+                callback_data["service_data"] = service_data
+                callback_data["service_uuid"] = service_uuids
+                callback_data["rssi"] = r
+                callback_data["platform_data"] = (p, a, r)
 
                 self._callback(callback_data)
             except Exception:
-                logger.exception("Exception caught while calling callback function, trying with default")
+                logger.exception(
+                    "Exception caught while calling callback function, "
+                    "trying with default"
+                )
                 self._callback(get_reference_callback_format())
 
         self._manager.callbacks[id(self)] = callback
@@ -220,7 +232,7 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
         scanner = cls(timeout=timeout)
 
         def stop_if_detected(callback_dict: dict):
-            peripheral = callback_dict['platform_data'][0]
+            peripheral = callback_dict["platform_data"][0]
 
             if str(peripheral.identifier().UUIDString()).lower() == device_identifier:
                 loop.call_soon_threadsafe(stop_scanning_event.set)

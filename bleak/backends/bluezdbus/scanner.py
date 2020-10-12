@@ -309,24 +309,42 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
             callback_data = get_reference_callback_format()
 
             try:
-                # First ensure that the message body is a list and has the dict with all the info
+                # First ensure that the message body is a list and has the dict with
+                # all the info
                 if isinstance(message.body, list) and len(message.body) > 2:
                     discovery_data = message.body[1]
 
-                    # Populate the callback_data, note getting all populated occurs infrequently
-                    callback_data['address'] = message.path[message.path.rfind("dev_") + 4:].replace("_", ":")
-                    callback_data['name'] = discovery_data.get('Alias', discovery_data.get('Name', None))
-                    callback_data['data_channel'] = discovery_data.get('Adaptor', None)
-                    callback_data['manufacturer_data'] = discovery_data.get('ManufacturerData', {})
-                    callback_data['service_data'] = discovery_data.get('ServiceData', None)
-                    callback_data['service_uuid'] = discovery_data.get('UUIDs', [])
-                    callback_data['rssi'] = discovery_data.get('RSSI', None)
-                    callback_data['platform_data'] = message
+                    # Populate the callback_data, note getting all populated occurs
+                    # infrequently
+                    callback_data["address"] = message.path[
+                        message.path.rfind("dev_") + 4 :
+                    ].replace("_", ":")
+
+                    callback_data["name"] = discovery_data.get(
+                        "Alias", discovery_data.get("Name", None)
+                    )
+
+                    callback_data["data_channel"] = discovery_data.get("Adaptor", None)
+
+                    callback_data["manufacturer_data"] = discovery_data.get(
+                        "ManufacturerData", {}
+                    )
+
+                    callback_data["service_data"] = discovery_data.get(
+                        "ServiceData", None
+                    )
+
+                    callback_data["service_uuid"] = discovery_data.get("UUIDs", [])
+
+                    callback_data["rssi"] = discovery_data.get("RSSI", None)
+
+                    callback_data["platform_data"] = message
 
                 self._callback(callback_data)
             except Exception:
-                logger.exception("Exception caught unpacking callback message, trying with defaults...")
+                logger.exception(
+                    "Exception caught unpacking callback message, "
+                    "trying with defaults..."
+                )
                 print("HI")
                 self._callback(get_reference_callback_format())
-
-
