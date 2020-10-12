@@ -29,5 +29,6 @@ async def run():
         await asyncio.sleep(1)
         await scanner.stop()
 
+
 loop = asyncio.get_event_loop()
 loop.run_until_complete(run())

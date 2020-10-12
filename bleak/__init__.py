@@ -33,15 +33,16 @@ def get_reference_callback_format() -> dict:
     """
     Sets and returns the format of the dictionary for callbacks
     """
-    CALLBACK_FORMAT = {"address"          : None,
-                       "name"             : None,
-                       "rssi"             : None,
-                       "data_channel"     : None,
-                       "manufacturer_data": None,
-                       "service_data"     : None,
-                       "service_uuid"     : None,
-                       "platform_data"    : None
-                       }
+    CALLBACK_FORMAT = {
+        "address": None,
+        "name": None,
+        "rssi": None,
+        "data_channel": None,
+        "manufacturer_data": None,
+        "service_data": None,
+        "service_uuid": None,
+        "platform_data": None,
+    }
 
     return CALLBACK_FORMAT
 
