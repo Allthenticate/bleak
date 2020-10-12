@@ -40,19 +40,19 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
     async def start(self):
         self._identifiers = {}
 
-        def safe_list_get(list: list, idx: int, default):
+        def safe_list_get(l: list, idx: int, default):
             """
             Returns an index from a list safely similar to .get() with dicts
             """
             try:
-                return repr(list[idx]).lower()
+                return repr(l[idx]).lower()
             except IndexError:
                 return default
 
         def callback_dict_breakdown(data) -> Union[None, dict]:
             """
             This function parses the __NSDictionaryM or __NSSingleEntryDictionry
-            I object passed as data into a more user-friendly dictionary which
+            object passed as data into a more user-friendly dictionary which
             is returned, if data is None, or if an exception is raised during
             parsing, None is returned
             """
@@ -72,32 +72,51 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
             if self._callback:
             self._identifiers[p.identifier()] = a
 
-            service_data_dict = a.get("kCBAdvDataServiceData", {})
-            manufacturer_data_raw = list(
-                a.get("kCBAdvDataManufacturerData", ""))
-
-            manufacturer_data = {}
-            if manufacturer_data_raw:
-                manufacturer_data[manufacturer_data_raw[0]] = \
-                    manufacturer_data_raw[2:]
-
+            # Get the defaults
             callback_data = get_reference_callback_format()
 
-            callback_data['address'] = p.identifier().UUIDString()
-            callback_data['name'] = p.name()
+            # Get the raw data from the advertisement to be parse
+            service_data_dict_raw = a.get("kCBAdvDataServiceData", {})
+            manufacturer_data_raw = list(a.get("kCBAdvDataManufacturerData", ""))
 
-            callback_data['data_channel'] = a.get("kCBAdvDataChannel")
-            callback_data['manufacturer_data'] = manufacturer_data
-            callback_data['service_data'] = callback_dict_breakdown(
-                                            service_data_dict)
-            callback_data['service_uuid'] = safe_list_get(
-                a.get("kCBAdvDataServiceUUIDs", []), 0, []  )
-            callback_data['rssi'] = r
+            # Process manufacturer data into a more friendly format
+            try:
+                manufacturer_data = {}
+                if manufacturer_data_raw:
+                    manufacturer_data[manufacturer_data_raw[0]] = manufacturer_data_raw[2:]
+            except Exception:
+                logger.exception("Exception caught while parsing manufacturer data upon discovery")
+                manufacturer_data = {}
+
+            # Process service data into a nicer format
+            try:
+                service_data = callback_dict_breakdown(service_data_dict_raw)
+            except Exception:
+                logger.exception("Exception caught while parsing service data upon discovery")
+                service_data = {}
+
+            # Process service uuids into a list
+            try:
+                service_uuids = safe_list_get(a.get("kCBAdvDataServiceUUIDs", []), 0, [])
+            except Exception:
+                logger.exception("Exception caught while parsing service uuids upon discovery")
+                service_uuids = []
 
             try:
-                self._callback(p, a, r, callback_data)
-            except:
-                self._callback(p, a, r, {})
+                # Populate the callback dictionary
+                callback_data['address'] = p.identifier().UUIDString()
+                callback_data['name'] = p.name()
+                callback_data['data_channel'] = a.get("kCBAdvDataChannel")
+                callback_data['manufacturer_data'] = manufacturer_data
+                callback_data['service_data'] = service_data
+                callback_data['service_uuid'] = service_uuids
+                callback_data['rssi'] = r
+                callback_data['platform_data'] = (p, a, r)
+
+                self._callback(callback_data)
+            except Exception:
+                logger.exception("Exception caught while calling callback function, trying with default")
+                self._callback(get_reference_callback_format())
 
         self._manager.callbacks[id(self)] = callback
         self._manager.start_scan({})
@@ -197,7 +216,9 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
         device_identifier = device_identifier.lower()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(peripheral, advertisement_data, rssi, *args):
+        def stop_if_detected(callback_dict: dict):
+            peripheral = callback_dict['platform_data'][0]
+
             if str(peripheral.identifier().UUIDString()).lower() == device_identifier:
                 loop.call_soon_threadsafe(stop_scanning_event.set)
 

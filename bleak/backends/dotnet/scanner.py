@@ -91,20 +91,32 @@ class BleakScannerDotNet(BaseBleakScanner):
                 if event_args.BluetoothAddress not in self._devices:
                     self._devices[event_args.BluetoothAddress] = event_args
         if self._callback is not None:
+            # Get the default dictionary to populate
             callback_data = get_reference_callback_format()
 
-            uuids = []
-            for u in e.Advertisement.ServiceUuids:
-                uuids.append(u.ToString())
-            data = {}
-            for m in e.Advertisement.ManufacturerData:
-                md = IBuffer(m.Data)
-                b = Array.CreateInstance(Byte, md.Length)
-                reader = DataReader.FromBuffer(md)
-                reader.ReadBytes(b)
-                datalist = []
-                datalist[:] = bytes(b).hex()
-                data[m.CompanyId] = datalist
+            # Get any and all uuids from the advertisement
+            try:
+                service_uuids = []
+                for u in e.Advertisement.ServiceUuids:
+                    service_uuids.append(u.ToString())
+            except Exception:
+                logger.exception("Exception caught while parsing uuids from discovery")
+                service_uuids = []
+
+            # Get the manufacturer data from the advertisement, borrowed from parse_eventargs
+            try:
+                data = {}
+                for manufacturer in e.Advertisement.ManufacturerData:
+                    manufacturer_data_buffer = IBuffer(manufacturer.Data)
+                    manufacturer_data_bytes = Array.CreateInstance(Byte, manufacturer_data_buffer.Length)
+                    reader = DataReader.FromBuffer(manufacturer_data_buffer)
+                    reader.ReadBytes(manufacturer_data_bytes)
+                    datalist = []
+                    datalist[:] = bytes(manufacturer_data_bytes).hex()
+                    data[manufacturer.CompanyId] = datalist
+            except Exception:
+                logger.exception("Exception caught while parsing manufacturer data from discovery")
+                data = {}
 
             try:
                 callback_data['address'] = e.BluetoothAddress or None
@@ -112,13 +124,14 @@ class BleakScannerDotNet(BaseBleakScanner):
                 callback_data['data_channel'] = None
                 callback_data['manufacturer_data'] = data
                 callback_data['service_data'] = None
-                callback_data['service_uuid'] = uuids
+                callback_data['service_uuid'] = service_uuids
                 callback_data['rssi'] = e.RawSignalStrengthInDBm or None
+                callback_data['platform_data'] = (sender, e)
 
-                self._callback(sender, e, None, callback_data)
+                self._callback(callback_data)
             except Exception:
                 logger.exception("Exception caught unpacking callback message, returning defaults...")
-                self._callback(sender, e, None, callback_data)
+                self._callback(get_reference_callback_format())
 
     def _stopped_handler(self, sender, event_args):
         if sender == self.watcher:
@@ -289,7 +302,8 @@ class BleakScannerDotNet(BaseBleakScanner):
         stop_scanning_event = asyncio.Event()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(sender, event_args, *args):
+        def stop_if_detected(callback_dict: dict):
+            event_args = callback_dict['platform_data'][1]
             if event_args.BluetoothAddress == ulong_id:
                 loop.call_soon_threadsafe(stop_scanning_event.set)
 

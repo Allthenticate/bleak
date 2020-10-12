@@ -31,7 +31,7 @@ if bool(os.environ.get("BLEAK_LOGGING", False)):
 
 def get_reference_callback_format() -> dict:
     """
-    Returns the default call back format w/ guarenteed fields
+    Sets and returns the format of the dictionary for callbacks
     """
     CALLBACK_FORMAT = {"address"          : None,
                        "name"             : None,
@@ -39,8 +39,10 @@ def get_reference_callback_format() -> dict:
                        "data_channel"     : None,
                        "manufacturer_data": None,
                        "service_data"     : None,
-                       "service_uuid"     : None
+                       "service_uuid"     : None,
+                       "platform_data"    : None
                        }
+
     return CALLBACK_FORMAT
 
 
