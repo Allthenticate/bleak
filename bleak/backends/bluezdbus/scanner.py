@@ -238,7 +238,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         stop_scanning_event = asyncio.Event()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(message, *args):
+        def stop_if_detected(callback_dict: dict):
             if any(
                 device.get("Address", "").lower() == device_identifier
                 for device in scanner._devices.values()
@@ -305,27 +305,28 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         )
 
         if self._callback is not None:
+            # Get the default dictionary
             callback_data = get_reference_callback_format()
 
             try:
-                device_dict = message.body[1]
-                if isinstance(device_dict, dict) and 'org.bluez.Device1' in device_dict:
-                    device_dict = device_dict['org.bluez.Device1']
+                # First ensure that the message body is a list and has the dict with all the info
+                if isinstance(message.body, list) and len(message.body) > 2:
+                    discovery_data = message.body[1]
 
-                callback_data['address'] = device_dict.get('Address', None)
-                callback_data['name'] = device_dict.get('Alias', device_dict.get('Name', None))
-                callback_data['data_channel'] = device_dict.get('Adaptor', None)
-                callback_data['manufacturer_data'] = device_dict.get('ManufacturerData', {})
-                callback_data['service_data'] = device_dict.get('ServiceData', None)
-                callback_data['service_uuid'] = device_dict.get('UUIDs', [])
-                callback_data['rssi'] = device_dict.get('RSSI', None)
+                    # Populate the callback_data, note getting all populated occurs infrequently
+                    callback_data['address'] = message.path[message.path.rfind("dev_") + 4:].replace("_", ":")
+                    callback_data['name'] = discovery_data.get('Alias', discovery_data.get('Name', None))
+                    callback_data['data_channel'] = discovery_data.get('Adaptor', None)
+                    callback_data['manufacturer_data'] = discovery_data.get('ManufacturerData', {})
+                    callback_data['service_data'] = discovery_data.get('ServiceData', None)
+                    callback_data['service_uuid'] = discovery_data.get('UUIDs', [])
+                    callback_data['rssi'] = discovery_data.get('RSSI', None)
+                    callback_data['platform_data'] = message
 
-                self._callback(message, None, None, callback_data)
+                self._callback(callback_data)
             except Exception:
-                logger.exception("Exception caught unpacking callback message, returning defaults...")
-                try:
-                    self._callback(message, None, None, callback_data)
-                except:
-                    # This is for the stop_if_detected
-                    self._callback(message)
+                logger.exception("Exception caught unpacking callback message, trying with defaults...")
+                print("HI")
+                self._callback(get_reference_callback_format())
+
 
