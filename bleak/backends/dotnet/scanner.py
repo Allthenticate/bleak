@@ -103,15 +103,10 @@ class BleakScannerDotNet(BaseBleakScanner):
             try:
                 data = {}
                 for manufacturer in e.Advertisement.ManufacturerData:
-                    manufacturer_data_buffer = IBuffer(manufacturer.Data)
-                    manufacturer_data_bytes = Array.CreateInstance(
-                        Byte, manufacturer_data_buffer.Length
-                    )
-                    reader = DataReader.FromBuffer(manufacturer_data_buffer)
-                    reader.ReadBytes(manufacturer_data_bytes)
-                    datalist = []
-                    datalist[:] = bytes(manufacturer_data_bytes).hex()
-                    data[manufacturer.CompanyId] = datalist
+                    with BleakDataReader(manufacturer.Data) as reader:
+                        m_data = []
+                        m_data[:] = bytes(reader.read()).hex()
+                        data[manufacturer.CompanyId] = m_data
             except Exception:
                 logger.exception(
                     "Exception caught while parsing manufacturer data from discovery"
