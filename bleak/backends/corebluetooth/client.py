@@ -22,6 +22,7 @@ from bleak.backends.corebluetooth.characteristic import (
 from bleak.backends.corebluetooth.descriptor import BleakGATTDescriptorCoreBluetooth
 from bleak.backends.corebluetooth.scanner import BleakScannerCoreBluetooth
 from bleak.backends.corebluetooth.service import BleakGATTServiceCoreBluetooth
+from bleak.backends.corebluetooth.utils import cb_uuid_to_str
 from bleak.backends.device import BLEDevice
 from bleak.backends.service import BleakGATTServiceCollection
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -47,6 +48,9 @@ class BleakClientCoreBluetooth(BaseBleakClient):
 
         if isinstance(address_or_ble_device, BLEDevice):
             self._device_info = address_or_ble_device.details
+            self._central_manager_delegate = address_or_ble_device.metadata.get(
+                "delegate"
+            )
         else:
             self._device_info = None
             self._central_manager_delegate = None

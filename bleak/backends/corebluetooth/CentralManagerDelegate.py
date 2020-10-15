@@ -149,7 +149,7 @@ class CentralManagerDelegate(NSObject):
         while self._connection_state == CMDConnectionState.PENDING:
             await asyncio.sleep(0)
             if time.time() - start > timeout:
-                raise TimeoutError("Failed to connect in %d seconds" % timeout)
+                raise TimeoutError("Failed to connect in %f seconds" % timeout)
 
         self.connected_peripheral = peripheral
 
