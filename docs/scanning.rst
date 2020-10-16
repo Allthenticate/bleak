@@ -96,6 +96,11 @@ In the manual mode, it is possible to add an own callback that you want to call 
 scanner detection, as can be seen above. There are also possibilities of adding scanning filters,
 which differ widely between OS backend implementations, so the instructions merit careful reading.
 
+Note that the when using :code:`BleakScanner.register_detection_callback(callback)`, your callback
+function will be passed a dictionary with entries that are standardized across platforms. The format
+can be found in `__init__.py` in the bleak module. Platform specific advertisements are within the
+dict as "platform_data". `See detection_callback.py` example.
+
 Scanning Filters
 ----------------
 
