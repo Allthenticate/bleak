@@ -76,6 +76,7 @@ class CentralManagerDelegate(NSObject):
 
         self.callbacks = {}
         self.disconnected_callback = None
+        self._connection_state_changed = asyncio.Event()
 
         self.central_manager = CBCentralManager.alloc().initWithDelegate_queue_(
             self, dispatch_queue_create(b"bleak.corebluetooth", DISPATCH_QUEUE_SERIAL)
@@ -145,11 +146,11 @@ class CentralManagerDelegate(NSObject):
         self._connection_state = CMDConnectionState.PENDING
         self.central_manager.connectPeripheral_options_(peripheral, None)
 
-        start = time.time()
-        while self._connection_state == CMDConnectionState.PENDING:
-            await asyncio.sleep(0)
-            if time.time() - start > timeout:
-                raise TimeoutError("Failed to connect in %f seconds" % timeout)
+        try:
+            await asyncio.wait_for(self._connection_state_changed.wait(), timeout=timeout)
+        except TimeoutError:
+            logger.debug(f"Connection timed out after {timeout} seconds.")
+            return False
 
         self.connected_peripheral = peripheral
 
@@ -275,6 +276,7 @@ class CentralManagerDelegate(NSObject):
             )
             self.connected_peripheral_delegate = peripheralDelegate
             self._connection_state = CMDConnectionState.CONNECTED
+            self._connection_state_changed.set()
 
     def centralManager_didConnectPeripheral_(self, central, peripheral):
         logger.debug("centralManager_didConnectPeripheral_")
@@ -294,6 +296,7 @@ class CentralManagerDelegate(NSObject):
             )
         )
         self._connection_state = CMDConnectionState.DISCONNECTED
+        self._connection_state_changed.set()
 
     def centralManager_didFailToConnectPeripheral_error_(
         self, centralManager: CBCentralManager, peripheral: CBPeripheral, error: NSError
