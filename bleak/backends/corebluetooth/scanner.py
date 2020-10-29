@@ -3,10 +3,9 @@ import logging
 import pathlib
 from typing import Callable, Union, List
 
-from bleak import get_reference_callback_format
 from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
 from bleak.backends.device import BLEDevice
-from bleak.backends.scanner import BaseBleakScanner
+from bleak.backends.scanner import BaseBleakScanner, AdvertisementData
 from bleak.exc import BleakError
 
 logger = logging.getLogger(__name__)
@@ -74,9 +73,6 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
         def callback(p, a, r):
             self._identifiers[p.identifier()] = a
 
-            # Get the defaults
-            callback_data = get_reference_callback_format()
-
             # Get the raw data from the advertisement to be parse
             service_data_dict_raw = a.get("kCBAdvDataServiceData", {})
             manufacturer_data_raw = list(a.get("kCBAdvDataManufacturerData", ""))
@@ -114,24 +110,17 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
                 )
                 service_uuids = []
 
-            try:
-                # Populate the callback dictionary
-                callback_data["address"] = p.identifier().UUIDString()
-                callback_data["name"] = p.name()
-                callback_data["data_channel"] = a.get("kCBAdvDataChannel")
-                callback_data["manufacturer_data"] = manufacturer_data
-                callback_data["service_data"] = service_data
-                callback_data["service_uuid"] = service_uuids
-                callback_data["rssi"] = r
-                callback_data["platform_data"] = (p, a, r)
+            advertisement_data = AdvertisementData(
+                address=p.identifier().UUIDString(),
+                local_name=p.name(),
+                rssi=r,
+                manufacturer_data=manufacturer_data,
+                service_data=service_data,
+                service_uuids=service_uuids,
+                platform_data=(p, a, r)
+            )
 
-                self._callback(callback_data)
-            except Exception:
-                logger.exception(
-                    "Exception caught while calling callback function, "
-                    "trying with default"
-                )
-                self._callback(get_reference_callback_format())
+            self._callback(advertisement_data)
 
         self._manager.callbacks[id(self)] = callback
         self._manager.start_scan({})
@@ -162,40 +151,12 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
     async def get_discovered_devices(self) -> List[BLEDevice]:
         found = []
         peripherals = self._manager.central_manager.retrievePeripheralsWithIdentifiers_(
-            self._identifiers.keys(),
+            self._identifiers.keys()
         )
 
         for i, peripheral in enumerate(peripherals):
-            address = peripheral.identifier().UUIDString()
-            name = peripheral.name() or "Unknown"
-            details = peripheral
-
-            advertisementData = self._identifiers[peripheral.identifier()]
-            manufacturer_binary_data = advertisementData.get(
-                "kCBAdvDataManufacturerData"
-            )
-            manufacturer_data = {}
-            if manufacturer_binary_data:
-                manufacturer_id = int.from_bytes(
-                    manufacturer_binary_data[0:2], byteorder="little"
-                )
-                manufacturer_value = bytes(manufacturer_binary_data[2:])
-                manufacturer_data = {manufacturer_id: manufacturer_value}
-
-            uuids = [
-                # converting to lower case to match other platforms
-                str(u).lower()
-                for u in advertisementData.get("kCBAdvDataServiceUUIDs", [])
-            ]
-
             found.append(
-                BLEDevice(
-                    address,
-                    name,
-                    details,
-                    uuids=uuids,
-                    manufacturer_data=manufacturer_data,
-                )
+                self.get_ble_device_from_peripheral(peripheral)
             )
 
         return found
@@ -231,8 +192,8 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
         device_identifier = device_identifier.lower()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(callback_dict: dict):
-            peripheral = callback_dict["platform_data"][0]
+        def stop_if_detected(advertisement_data: AdvertisementData):
+            peripheral = advertisement_data.platform_data[0]
 
             if str(peripheral.identifier().UUIDString()).lower() == device_identifier:
                 loop.call_soon_threadsafe(stop_scanning_event.set)
