@@ -3,11 +3,10 @@ import asyncio
 import pathlib
 from typing import Callable, List
 
-from bleak.backends.scanner import BaseBleakScanner
+from bleak.backends.scanner import BaseBleakScanner, AdvertisementData
 from bleak.backends.device import BLEDevice
 from bleak.backends.bluezdbus import defs, get_reactor
 from bleak.backends.bluezdbus.utils import validate_mac_address
-from bleak import get_reference_callback_format
 from txdbus import client
 
 logger = logging.getLogger(__name__)
@@ -237,7 +236,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         stop_scanning_event = asyncio.Event()
         scanner = cls(timeout=timeout)
 
-        def stop_if_detected(callback_dict: dict):
+        def stop_if_detected(advertisement_data: AdvertisementData):
             if any(
                 device.get("Address", "").lower() == device_identifier
                 for device in scanner._devices.values()
@@ -304,46 +303,45 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         )
 
         if self._callback is not None:
-            # Get the default dictionary
-            callback_data = get_reference_callback_format()
-
             try:
-                # First ensure that the message body is a list and has the dict with
-                # all the info
+                # First ensure that the message body is a list and has the dict where we can find the information we
+                # need
                 if isinstance(message.body, list) and len(message.body) > 2:
                     discovery_data = message.body[1]
 
-                    # Populate the callback_data, note getting all populated occurs
-                    # infrequently
-                    callback_data["address"] = message.path[
-                        message.path.rfind("dev_") + 4 :
-                    ].replace("_", ":")
+                    # Get all the information wanted to pack in the advertisement data
+                    _address = message.path[message.path.rfind("dev_") + 4 :].replace(
+                        "_", ":"
+                    )
 
-                    callback_data["name"] = discovery_data.get(
+                    _local_name = discovery_data.get(
                         "Alias", discovery_data.get("Name", None)
                     )
 
-                    callback_data["data_channel"] = discovery_data.get("Adaptor", None)
+                    _manufacturer_data = discovery_data.get("ManufacturerData", {})
 
-                    callback_data["manufacturer_data"] = discovery_data.get(
-                        "ManufacturerData", {}
+                    _service_data = discovery_data.get("ServiceData", {})
+
+                    _service_uuids = discovery_data.get("UUIDs", [])
+
+                    _rssi = discovery_data.get("RSSI", 0)
+
+                    advertisement_data = AdvertisementData(
+                        address=_address,
+                        local_name=_local_name,
+                        rssi=_rssi,
+                        manufacturer_data=_manufacturer_data,
+                        service_data=_service_data,
+                        service_uuids=_service_uuids,
+                        platform_data=(message,),
                     )
 
-                    callback_data["service_data"] = discovery_data.get(
-                        "ServiceData", None
-                    )
+                    self._callback(advertisement_data)
 
-                    callback_data["service_uuid"] = discovery_data.get("UUIDs", [])
-
-                    callback_data["rssi"] = discovery_data.get("RSSI", None)
-
-                    callback_data["platform_data"] = message
-
-                self._callback(callback_data)
+                logger.info(
+                    "Advertisement Data was an unexpected format, unable to safely trigger callback"
+                )
             except Exception:
                 logger.exception(
-                    "Exception caught unpacking callback message, "
-                    "trying with defaults..."
+                    "Exception caught unpacking callback message, not triggering callback"
                 )
-                print("HI")
-                self._callback(get_reference_callback_format())

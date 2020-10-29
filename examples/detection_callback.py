@@ -9,15 +9,15 @@ Updated on 2020-10-11 by bernstern <bernie@allthenticate.net>
 """
 
 import asyncio
-from pprint import pprint
 from bleak import BleakScanner
+from bleak.backends.scanner import AdvertisementData
 import logging
 
 logging.basicConfig()
 
 
-def simple_callback(callback_dict: dict):
-    pprint(callback_dict)
+def simple_callback(callback_data: AdvertisementData):
+    print(callback_data)
 
 
 async def run():
