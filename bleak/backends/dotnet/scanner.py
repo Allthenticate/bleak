@@ -96,12 +96,12 @@ class BleakScannerDotNet(BaseBleakScanner):
             # Use the BLEDevice to populate all the fields for the advertisement data to return
             advertisement_data = AdvertisementData(
                 address=temporary_device.address,
-                local_name=temporary_device.name,
+                local_name=temporary_device.name or "Unknown",
                 rssi=temporary_device.rssi,
                 manufacturer_data=temporary_device.metadata["manufacturer_data"],
                 service_data=event_args.Advertisement.GetSectionsByType(0x16),
                 service_uuids=temporary_device.metadata["uuids"],
-                platform_data=(sender, event_args)
+                platform_data=(sender, event_args),
             )
 
             self._callback(advertisement_data)

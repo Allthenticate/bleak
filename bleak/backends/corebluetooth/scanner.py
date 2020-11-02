@@ -7,7 +7,6 @@ from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDe
 from bleak.backends.corebluetooth.utils import cb_uuid_to_str
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import BaseBleakScanner, AdvertisementData
-from bleak.exc import BleakError
 
 logger = logging.getLogger(__name__)
 _here = pathlib.Path(__file__).parent
@@ -109,12 +108,12 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
 
             advertisement_data = AdvertisementData(
                 address=p.identifier().UUIDString(),
-                local_name=p.name(),
+                local_name=p.name() or "Unknown",
                 rssi=r,
                 manufacturer_data=manufacturer_data,
                 service_data=service_data,
                 service_uuids=service_uuids,
-                platform_data=(p, a, r)
+                platform_data=(p, a, r),
             )
 
             self._callback(advertisement_data)

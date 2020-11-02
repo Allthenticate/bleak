@@ -328,7 +328,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
 
                     advertisement_data = AdvertisementData(
                         address=_address,
-                        local_name=_local_name,
+                        local_name=_local_name or "Unknown",
                         rssi=_rssi,
                         manufacturer_data=_manufacturer_data,
                         service_data=_service_data,
