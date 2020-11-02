@@ -3,7 +3,6 @@ import asyncio
 import pathlib
 from typing import Callable, Union, List
 
-from bleak import get_reference_callback_format
 from bleak.backends.device import BLEDevice
 from bleak.backends.dotnet.utils import BleakDataReader
 from bleak.exc import BleakError, BleakDotNetTaskError
@@ -92,7 +91,7 @@ class BleakScannerDotNet(BaseBleakScanner):
                     self._devices[event_args.BluetoothAddress] = event_args
         if self._callback is not None:
             # Get a "BLEDevice" from parse_event args
-            temporary_device = self.parse_eventargs(e)
+            temporary_device = self.parse_eventargs(event_args)
 
             # Use the BLEDevice to populate all the fields for the advertisement data to return
             advertisement_data = AdvertisementData(
@@ -100,9 +99,9 @@ class BleakScannerDotNet(BaseBleakScanner):
                 local_name=temporary_device.name,
                 rssi=temporary_device.rssi,
                 manufacturer_data=temporary_device.metadata["manufacturer_data"],
-                service_data=e.Advertisement.GetSectionsByType(0x16),
+                service_data=event_args.Advertisement.GetSectionsByType(0x16),
                 service_uuids=temporary_device.metadata["uuids"],
-                platform_data=(sender, e)
+                platform_data=(sender, event_args)
             )
 
             self._callback(advertisement_data)

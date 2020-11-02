@@ -69,8 +69,6 @@ class BleakScannerCoreBluetooth(BaseBleakScanner):
         def callback(p, a, r):
             # update identifiers for scanned device
             self._identifiers.setdefault(p.identifier(), {}).update(a)
-            if self._callback:
-            self._identifiers[p.identifier()] = a
 
             # Get the raw data from the advertisement to be parse
             service_data_dict_raw = a.get("kCBAdvDataServiceData", {})
