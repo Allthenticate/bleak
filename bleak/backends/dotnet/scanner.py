@@ -3,6 +3,7 @@ import asyncio
 import pathlib
 from typing import Callable, Union, List
 
+from bleak import get_reference_callback_format
 from bleak.backends.device import BLEDevice
 from bleak.backends.dotnet.utils import BleakDataReader
 from bleak.exc import BleakError, BleakDotNetTaskError
