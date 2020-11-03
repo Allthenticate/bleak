@@ -3,7 +3,6 @@ import asyncio
 import pathlib
 from typing import Callable, Union, List
 
-from bleak import get_reference_callback_format
 from bleak.backends.device import BLEDevice
 from bleak.backends.dotnet.utils import BleakDataReader
 from bleak.exc import BleakError, BleakDotNetTaskError
@@ -107,7 +106,7 @@ class BleakScannerDotNet(BaseBleakScanner):
 
             self._callback(advertisement_data)
 
-    def AdvertisementWatcher_Stopped(self, sender, e):
+    def _stopped_handler(self, sender, e):
         if sender == self.watcher:
             logger.debug(
                 "{0} devices found. Watcher status: {1}.".format(
