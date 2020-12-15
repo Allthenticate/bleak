@@ -311,6 +311,8 @@ class CentralManagerDelegate(NSObject):
         self, central: CBCentralManager, peripheral: CBPeripheral, error: NSError
     ):
         logger.debug("Peripheral Device disconnected!")
+        if self.connected_peripheral is not None:
+            self.central_manager.cancelPeripheralConnection_(self.connected_peripheral)
         self.connected_peripheral_delegate = None
         self.connected_peripheral = None
         self._connection_state = CMDConnectionState.DISCONNECTED
