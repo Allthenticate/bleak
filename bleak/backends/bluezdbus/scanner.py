@@ -1,5 +1,4 @@
 import logging
-import asyncio
 from typing import Any, Dict, List, Optional
 
 from dbus_next.aio import MessageBus
@@ -9,11 +8,25 @@ from dbus_next.signature import Variant
 
 from bleak.backends.bluezdbus import defs
 from bleak.backends.bluezdbus.signals import MatchRules, add_match, remove_match
-from bleak.backends.bluezdbus.utils import unpack_variants, validate_mac_address
+from bleak.backends.bluezdbus.utils import (
+    assert_reply,
+    unpack_variants,
+    validate_mac_address,
+)
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import BaseBleakScanner, AdvertisementData
 
 logger = logging.getLogger(__name__)
+
+# set of org.bluez.Device1 property names that come from advertising data
+_ADVERTISING_DATA_PROPERTIES = {
+    "AdvertisingData",
+    "AdvertisingFlags",
+    "ManufacturerData",
+    "Name",
+    "ServiceData",
+    "UUIDs",
+}
 
 
 def _device_info(path, props):
@@ -53,7 +66,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
 
         self._bus: Optional[MessageBus] = None
         self._cached_devices: Dict[str, Variant] = {}
-        self._devices: Dict[str, Any] = {}
+        self._devices: Dict[str, Dict[str, Any]] = {}
         self._rules: List[MatchRules] = []
         self._adapter_path: str = f"/org/bluez/{self._adapter}"
 
@@ -63,6 +76,9 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
 
     async def start(self):
         self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+
+        self._devices.clear()
+        self._cached_devices.clear()
 
         # Add signal listeners
 
@@ -74,7 +90,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
             arg0path=f"{self._adapter_path}/",
         )
         reply = await add_match(self._bus, rules)
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
         self._rules.append(rules)
 
         rules = MatchRules(
@@ -83,7 +99,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
             arg0path=f"{self._adapter_path}/",
         )
         reply = await add_match(self._bus, rules)
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
         self._rules.append(rules)
 
         rules = MatchRules(
@@ -92,7 +108,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
             path_namespace=self._adapter_path,
         )
         reply = await add_match(self._bus, rules)
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
         self._rules.append(rules)
 
         # Find the HCI device to use for scanning and get cached device properties
@@ -104,7 +120,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
                 interface=defs.OBJECT_MANAGER_INTERFACE,
             )
         )
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
 
         # get only the device interface
         self._cached_devices = {
@@ -112,6 +128,8 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
             for path, interfaces in reply.body[0].items()
             if defs.DEVICE_INTERFACE in interfaces
         }
+
+        logger.debug(f"cached devices: {self._cached_devices}")
 
         # Apply the filters
         reply = await self._bus.call(
@@ -124,7 +142,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
                 body=[self._filters],
             )
         )
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
 
         # Start scanning
         reply = await self._bus.call(
@@ -135,7 +153,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
                 member="StartDiscovery",
             )
         )
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
 
     async def stop(self):
         reply = await self._bus.call(
@@ -146,7 +164,7 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
                 member="StopDiscovery",
             )
         )
-        assert reply.message_type == MessageType.METHOD_RETURN
+        assert_reply(reply)
 
         for rule in self._rules:
             await remove_match(self._bus, rule)
@@ -205,100 +223,112 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
 
     # Helper methods
 
-    def _update_devices(self, path: str, properties: Dict[str, Variant]):
-        """Update the active devices based on the new properties.
+    def _invoke_callback(self, path: str, message: Message) -> None:
+        """Invokes the advertising data callback.
 
         Args:
-            path: The D-Bus path of the device.
-            properties: New properties for this device.
+            message: The D-Bus message that triggered the callback.
         """
-        # if this is the first time we have seen this device, use the cached
-        # properties from ObjectManager.GetManagedObjects as a starting point
-        # if they exist
-        if path not in self._devices:
-            self._devices[path] = {}
-            self._update_devices(path, self._cached_devices.get(path, {}))
+        if self._callback is None:
+            return
 
-        # then update the existing properties with the new ones
-        self._devices[path].update(properties)
+        props = self._devices[path]
+
+        # Get all the information wanted to pack in the advertisement data
+        _local_name = props.get("Name")
+        _manufacturer_data = {
+            k: bytes(v) for k, v in props.get("ManufacturerData", {}).items()
+        }
+        _service_data = {k: bytes(v) for k, v in props.get("ServiceData", {}).items()}
+        _service_uuids = props.get("UUIDs", [])
+
+        # Pack the advertisement data
+        advertisement_data = AdvertisementData(
+            local_name=_local_name,
+            manufacturer_data=_manufacturer_data,
+            service_data=_service_data,
+            service_uuids=_service_uuids,
+            platform_data=(props, message),
+        )
+
+        device = BLEDevice(
+            props["Address"],
+            props["Alias"],
+            {"path": path, "props": props},
+            props.get("RSSI", 0),
+        )
+
+        self._callback(device, advertisement_data)
 
     def _parse_msg(self, message: Message):
+        if message.message_type != MessageType.SIGNAL:
+            return
+
+        logger.debug(
+            "received D-Bus signal: {0}.{1} ({2}): {3}".format(
+                message.interface, message.member, message.path, message.body
+            )
+        )
+
         if message.member == "InterfacesAdded":
             # if a new device is discovered while we are scanning, add it to
             # the discovered devices list
 
-            msg_path = message.body[0]
-            device_interface = unpack_variants(
-                message.body[1].get(defs.DEVICE_INTERFACE, {})
+            obj_path: str
+            interfaces_and_props: Dict[str, Dict[str, Variant]]
+            obj_path, interfaces_and_props = message.body
+            device_props = unpack_variants(
+                interfaces_and_props.get(defs.DEVICE_INTERFACE, {})
             )
-            self._update_devices(msg_path, device_interface)
-            logger.debug(
-                "{0}, {1} ({2}): {3}".format(
-                    message.member, message.interface, message.path, message.body
-                )
-            )
+            if device_props:
+                self._devices[obj_path] = device_props
+                self._invoke_callback(obj_path, message)
         elif message.member == "InterfacesRemoved":
             # if a device disappears while we are scanning, remove it from the
             # discovered devices list
 
-            msg_path = message.body[0]
-            try:
-                del self._devices[msg_path]
-            except KeyError:
-                pass
-            logger.debug(
-                "{0}, {1} ({2}): {3}".format(
-                    message.member, message.interface, message.path, message.body
-                )
-            )
+            obj_path: str
+            interfaces: List[str]
+            obj_path, interfaces = message.body
+
+            if defs.DEVICE_INTERFACE in interfaces:
+                # Using pop to avoid KeyError if obj_path does not exist
+                self._devices.pop(obj_path, None)
         elif message.member == "PropertiesChanged":
             # Property change events basically mean that new advertising data
             # was received or the RSSI changed. Either way, it lets us know
             # that the device is active and we can add it to the discovered
             # devices list.
 
-            if message.body[0] != defs.DEVICE_INTERFACE:
+            interface: str
+            changed: Dict[str, Variant]
+            invalidated: List[str]
+            interface, changed, invalidated = message.body
+
+            if interface != defs.DEVICE_INTERFACE:
                 return
 
-            changed = unpack_variants(message.body[1])
-            self._update_devices(message.path, changed)
+            first_time_seen = False
 
-            logger.debug(
-                "{0}, {1} ({2} dBm), Object Path: {3}".format(
-                    *_device_info(message.path, self._devices.get(message.path))
-                )
-            )
+            if message.path not in self._devices:
+                if message.path not in self._cached_devices:
+                    # This can happen when we start scanning. The "PropertyChanged"
+                    # handler is attached before "GetManagedObjects" is called
+                    # and so self._cached_devices is not assigned yet.
+                    # This is not a problem. We just discard the property value
+                    # since "GetManagedObjects" will return a newer value.
+                    return
 
-            if self._callback is None:
-                return
+                first_time_seen = True
+                self._devices[message.path] = self._cached_devices[message.path]
 
-            props = self._devices[message.path]
+            changed = unpack_variants(changed)
+            self._devices[message.path].update(changed)
 
-            # Make sure that we can actually construct a meaningful callback
-            if "Address" not in props and "Alias" not in props:
-                return
-
-            # Get all the information wanted to pack in the advertisement data
-            _local_name = props.get("Name")
-            _manufacturer_data = {
-                k: bytes(v) for k, v in props.get("ManufacturerData", {}).items()
-            }
-            _service_data = {
-                k: bytes(v) for k, v in props.get("ServiceData", {}).items()
-            }
-            _service_uuids = props.get("UUIDs", [])
-
-            # Pack the advertisement data
-            advertisement_data = AdvertisementData(
-                local_name=_local_name,
-                manufacturer_data=_manufacturer_data,
-                service_data=_service_data,
-                service_uuids=_service_uuids,
-                platform_data=(props, message),
-            )
-
-            device = BLEDevice(
-                props["Address"], props["Alias"], props, props.get("RSSI", 0)
-            )
-
-            self._callback(device, advertisement_data)
+            # Only do advertising data callback if this is the first time the
+            # device has been seen or if an advertising data property changed.
+            # Otherwise we get a flood of callbacks from RSSI changing.
+            if first_time_seen or not _ADVERTISING_DATA_PROPERTIES.isdisjoint(
+                changed.keys()
+            ):
+                self._invoke_callback(message.path, message)

@@ -279,7 +279,8 @@ class BleakClientDotNet(BaseBleakClient):
 
         return True
 
-    async def is_connected(self) -> bool:
+    @property
+    def is_connected(self) -> bool:
         """Check connection status between this client and the server.
 
         Returns:
@@ -711,7 +712,7 @@ class BleakClientDotNet(BaseBleakClient):
         with BleakDataWriter(data) as writer:
             write_result = await wrap_IAsyncOperation(
                 IAsyncOperation[GattWriteResult](
-                    descriptor.obj.WriteValueAsync(writer.DetachBuffer())
+                    descriptor.obj.WriteValueWithResultAsync(writer.detach_buffer())
                 ),
                 return_type=GattWriteResult,
             )
