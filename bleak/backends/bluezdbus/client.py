@@ -109,6 +109,9 @@ class BleakClientBlueZDBus(BaseBleakClient):
             BleakDBusError: If there was a D-Bus error
             asyncio.TimeoutError: If the connection timed out
         """
+        if self.address is None:
+            raise BleakError("Tried to connect to address 'None'")
+
         logger.debug(f"Connecting to device @ {self.address} with {self._adapter}")
 
         if self.is_connected:
@@ -367,6 +370,8 @@ class BleakClientBlueZDBus(BaseBleakClient):
         free the DBus matches that have been established.
         """
         logger.debug(f"_remove_signal_handlers({self._device_path})")
+        if self._bus is None:
+            return
 
         self._bus.remove_message_handler(self._parse_msg)
 

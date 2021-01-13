@@ -6,6 +6,7 @@ from dbus_next.constants import BusType, MessageType
 from dbus_next.message import Message
 from dbus_next.signature import Variant
 
+from bleak import BleakError
 from bleak.backends.bluezdbus import defs
 from bleak.backends.bluezdbus.signals import MatchRules, add_match, remove_match
 from bleak.backends.bluezdbus.utils import (
@@ -156,6 +157,9 @@ class BleakScannerBlueZDBus(BaseBleakScanner):
         assert_reply(reply)
 
     async def stop(self):
+        if self._bus is None:
+            raise BleakError("No scanner is currently running")
+
         reply = await self._bus.call(
             Message(
                 destination=defs.BLUEZ_SERVICE,
