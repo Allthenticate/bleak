@@ -591,6 +591,7 @@ class BleakClientBlueZDBus(BaseBleakClient):
     async def read_gatt_char(
         self,
         char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, UUID],
+        timeout: int = 1,
         **kwargs,
     ) -> bytearray:
         """Perform read operation on the specified GATT characteristic.
@@ -599,6 +600,7 @@ class BleakClientBlueZDBus(BaseBleakClient):
             char_specifier (BleakGATTCharacteristicBlueZDBus, int, str or UUID): The characteristic to read from,
                 specified by either integer handle, UUID or directly by the
                 BleakGATTCharacteristicBlueZDBus object representing it.
+            timeout (int): The number of seconds to wait before timing out.
 
         Returns:
             (bytearray) The read data.
@@ -655,15 +657,18 @@ class BleakClientBlueZDBus(BaseBleakClient):
                 )
             )
 
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=characteristic.path,
-                interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                member="ReadValue",
-                signature="a{sv}",
-                body=[{}],
-            )
+        reply = await asyncio.wait_for(
+            self._bus.call(
+                Message(
+                    destination=defs.BLUEZ_SERVICE,
+                    path=characteristic.path,
+                    interface=defs.GATT_CHARACTERISTIC_INTERFACE,
+                    member="ReadValue",
+                    signature="a{sv}",
+                    body=[{}],
+                ),
+            ),
+            timeout,
         )
         assert_reply(reply)
         value = bytearray(reply.body[0])
