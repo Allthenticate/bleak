@@ -72,51 +72,7 @@ class BleakScannerBlueZGattlib(BaseBleakScanner):
         # kwarg "device" is for backwards compatibility
         self._adapter_name = kwargs.get("adapter", kwargs.get("device", "hci0"))
         self._adapter = c_void_p(None)
-        self._c_callback = gattlib_discovered_device_type(self._on_discovered_device)
-
-    @staticmethod
-    def _on_discovered_device(adapter, address, name, user_data):
-        """
-            Callback when a device is discovered
-
-        :param adapter: The low-level adapter object
-        :param address: BLE address (e.g., AA:BB:CC:DD:EE:FF)
-        :param name: The resolved name (e.g., bobs-iphone)
-        :param user_data: User data that was passed into the scanner to keep track of which scanner returned this
-        :return:
-        """
-        device = Device(c_void_p(None), address, name)
-
-        # Make these strings
-        name = name.decode() if name else name
-        address = address.decode() if address else address
-
-        # Get all the information wanted to pack in the advertisement data
-        advertisement_data, manufacturer_id, manufacturer_data = device.get_advertisement_data()
-        _manufacturer_data = {manufacturer_id: manufacturer_data}
-        _service_data = advertisement_data
-        _service_uuids = device.get_uuids()
-
-        # Pack the advertisement data
-        advertisement_data = AdvertisementData(
-            local_name=name,
-            manufacturer_data=_manufacturer_data,
-            service_data=_service_data,
-            service_uuids=_service_uuids,
-        )
-
-        # Create our BLEDevice to return
-        device = BLEDevice(
-            address,
-            name,
-            None,
-            None,
-        )
-
-        # TODO(Chad): Implement `self` properly in the callback to make this compatible
-        print(device)
-        print(advertisement_data)
-        # self._callback(device, advertisement_data)
+        self._c_callback = None
 
     async def start(self):
         """ Start scanning for devices and storing them all in a local cache """
@@ -125,9 +81,55 @@ class BleakScannerBlueZGattlib(BaseBleakScanner):
         if ret != 0:
             raise BleakError("Failed to open adapter (%s)" % self._adapter_name)
 
+        # Implement this here so that we don't have to pass `self` to C and back
+        def _on_discovered_device(adapter, address, name, user_data):
+            """
+                Callback when a device is discovered
+
+            :param adapter: The low-level adapter object
+            :param address: BLE address (e.g., AA:BB:CC:DD:EE:FF)
+            :param name: The resolved name (e.g., bobs-iphone)
+            :param user_data: User data that was passed into the scanner to keep track of which scanner returned this
+            :return:
+            """
+            device = Device(c_void_p(None), address, name)
+
+            # Make these strings
+            name = name.decode() if name else name
+            address = address.decode() if address else address
+
+            # Get all the information wanted to pack in the advertisement data
+            advertisement_data, manufacturer_id, manufacturer_data = device.get_advertisement_data()
+            _manufacturer_data = {manufacturer_id: manufacturer_data}
+            _service_data = advertisement_data
+            _service_uuids = device.get_uuids()
+
+            # Pack the advertisement data
+            advertisement_data = AdvertisementData(
+                local_name=name,
+                manufacturer_data=_manufacturer_data,
+                service_data=_service_data,
+                service_uuids=_service_uuids,
+            )
+
+            # Create our BLEDevice to return
+            device = BLEDevice(
+                address,
+                name,
+                None,
+                None,
+            )
+
+            self._callback(device, advertisement_data)
+
+        # Be sure to keep a pointer to the callback so that the garbage collector doesn't clean it up
+        self._c_callback = gattlib_discovered_device_type(_on_discovered_device)
+
         # Start scanning asynchronously
         gattlib_adapter_scan_enable_async(
-            self._adapter, self._c_callback,  None
+            self._adapter,
+            self._c_callback,
+            None
         )
 
         return True
