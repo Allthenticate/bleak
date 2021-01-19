@@ -1,8 +1,12 @@
+import asyncio
 import logging
+import sys
+import threading
 from typing import Any, Dict, List, Optional
 
 # gattlib
-from gattlib import adapter
+# TODO(Chad): Only import the proper things PyCharm isn't being nice right now...
+from bleak.backends.bluezgattlib import *
 
 from bleak import BleakError
 from bleak.backends.bluezdbus import defs
@@ -12,6 +16,7 @@ from bleak.backends.bluezdbus.utils import (
     unpack_variants,
     validate_mac_address,
 )
+from bleak.backends.bluezgattlib.device import Device
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import BaseBleakScanner, AdvertisementData
 
@@ -59,23 +64,76 @@ class BleakScannerBlueZGattlib(BaseBleakScanner):
     """
 
     def __init__(self, **kwargs):
+        """
+        Keyword Args:
+            adapter (str): Name of Bluetooth adapter to use (e.g., hci0)
+        """
         super().__init__(**kwargs)
         # kwarg "device" is for backwards compatibility
         self._adapter_name = kwargs.get("adapter", kwargs.get("device", "hci0"))
-        self._adapter = adapter.Adapter(name=self._adapter_name)
+        self._adapter = c_void_p(None)
+        self._c_callback = gattlib_discovered_device_type(self._on_discovered_device)
 
-        # Discovery filters
-        self._filters: Dict[str, Variant] = {}
-        self.set_scanning_filter(**kwargs)
+    @staticmethod
+    def _on_discovered_device(adapter, address, name, user_data):
+        """
+            Callback when a device is discovered
+
+        :param adapter: The low-level adapter object
+        :param address: BLE address (e.g., AA:BB:CC:DD:EE:FF)
+        :param name: The resolved name (e.g., bobs-iphone)
+        :param user_data: User data that was passed into the scanner to keep track of which scanner returned this
+        :return:
+        """
+        device = Device(c_void_p(None), address, name)
+
+        # Make these strings
+        name = name.decode() if name else name
+        address = address.decode() if address else address
+
+        # Get all the information wanted to pack in the advertisement data
+        advertisement_data, manufacturer_id, manufacturer_data = device.get_advertisement_data()
+        _manufacturer_data = {manufacturer_id: manufacturer_data}
+        _service_data = advertisement_data
+        _service_uuids = device.get_uuids()
+
+        # Pack the advertisement data
+        advertisement_data = AdvertisementData(
+            local_name=name,
+            manufacturer_data=_manufacturer_data,
+            service_data=_service_data,
+            service_uuids=_service_uuids,
+        )
+
+        # Create our BLEDevice to return
+        device = BLEDevice(
+            address,
+            name,
+            None,
+            None,
+        )
+
+        # TODO(Chad): Implement `self` properly in the callback to make this compatible
+        print(device)
+        print(advertisement_data)
+        # self._callback(device, advertisement_data)
 
     async def start(self):
         """ Start scanning for devices and storing them all in a local cache """
-        self._adapter.open()
-        self._adapter.scan_enable(self._parse_msg, -1)
+        # Must encode as utf-8 to be a char * in C++
+        ret = gattlib_adapter_open(self._adapter_name.encode("utf-8"), byref(self._adapter))
+        if ret != 0:
+            raise BleakError("Failed to open adapter (%s)" % self._adapter_name)
+
+        # Start scanning asynchronously
+        gattlib_adapter_scan_enable_async(
+            self._adapter, self._c_callback,  None
+        )
+
+        return True
 
     async def stop(self):
-
-        return self._adapter.scan_disable()
+        return gattlib_adapter_scan_disable_async(self._adapter)
 
     def set_scanning_filter(self, **kwargs):
         """Sets OS level scanning filters for the BleakScanner.
@@ -98,9 +156,7 @@ class BleakScannerBlueZGattlib(BaseBleakScanner):
         discovered_devices = []
         for path, props in self._devices.items():
             if not props:
-                logger.debug(
-                    "Disregarding %s since no properties could be obtained." % path
-                )
+                logger.debug("Disregarding %s since no properties could be obtained." % path)
                 continue
             name, address, _, path = _device_info(path, props)
             if address is None:
@@ -119,55 +175,3 @@ class BleakScannerBlueZGattlib(BaseBleakScanner):
             )
         return discovered_devices
 
-    # Helper methods
-
-    # def _invoke_callback(self, path: str, message: Message) -> None:
-    #     """Invokes the advertising data callback.
-    #
-    #     Args:
-    #         message: The D-Bus message that triggered the callback.
-    #     """
-    #     if self._callback is None:
-    #         return
-    #
-    #     props = self._devices[path]
-    #
-    #     # Get all the information wanted to pack in the advertisement data
-    #     _local_name = props.get("Name")
-    #     _manufacturer_data = {k: bytes(v) for k, v in props.get("ManufacturerData", {}).items()}
-    #     _service_data = {k: bytes(v) for k, v in props.get("ServiceData", {}).items()}
-    #     _service_uuids = props.get("UUIDs", [])
-    #
-    #     # Pack the advertisement data
-    #     advertisement_data = AdvertisementData(
-    #         local_name=_local_name,
-    #         manufacturer_data=_manufacturer_data,
-    #         service_data=_service_data,
-    #         service_uuids=_service_uuids,
-    #         platform_data=(props, message),
-    #     )
-    #
-    #     device = BLEDevice(
-    #         props["Address"],
-    #         props["Alias"],
-    #         {"path": path, "props": props},
-    #         props.get("RSSI", 0),
-    #     )
-    #
-    #     self._callback(device, advertisement_data)
-
-    def _parse_msg(self, device, user_data):
-
-        logger.debug("---------------------------------")
-        logger.debug("Found BLE Device %s" % device.id)
-        adv_data = device.get_advertisement_data()
-        logger.debug("\t%s" % str(adv_data))
-        uuids = device.get_uuids()
-        logger.debug("\t%s" % uuids)
-        print(device.id, uuids)
-
-        # Only do advertising data callback if this is the first time the
-        # device has been seen or if an advertising data property changed.
-        # Otherwise we get a flood of callbacks from RSSI changing.
-        # if first_time_seen or not _ADVERTISING_DATA_PROPERTIES.isdisjoint(changed.keys()):
-        #     self._invoke_callback(message.path, message)
