@@ -26,13 +26,24 @@ class GattlibUuid(Structure):
     _fields_ = [("type", c_byte), ("value", GattlibUuidValue)]
 
 
+class GattlibUuidTypes:
+    BT_UUID_UNSPEC = 0
+    BT_UUID16 = 16
+    BT_UUID32 = 32
+    BT_UUID128 = 128
+
+
 # typedef struct {
 #    uint16_t  attr_handle_start;
 #    uint16_t  attr_handle_end;
 #    uuid_t    uuid;
 # } gattlib_primary_service_t;
 class GattlibPrimaryService(Structure):
-    _fields_ = [("attr_handle_start", c_ushort), ("attr_handle_end", c_ushort), ("uuid", GattlibUuid)]
+    _fields_ = [
+        ("attr_handle_start", c_ushort),
+        ("attr_handle_end", c_ushort),
+        ("uuid", GattlibUuid),
+    ]
 
 
 # typedef struct {
@@ -42,7 +53,12 @@ class GattlibPrimaryService(Structure):
 #    uuid_t    uuid;
 # } gattlib_characteristic_t;
 class GattlibCharacteristic(Structure):
-    _fields_ = [("handle", c_ushort), ("properties", c_byte), ("value_handle", c_ushort), ("uuid", GattlibUuid)]
+    _fields_ = [
+        ("handle", c_ushort),
+        ("properties", c_byte),
+        ("value_handle", c_ushort),
+        ("uuid", GattlibUuid),
+    ]
 
 
 # typedef struct {
@@ -59,7 +75,9 @@ gattlib_adapter_open = gattlib.gattlib_adapter_open
 gattlib_adapter_open.argtypes = [c_char_p, POINTER(c_void_p)]
 
 # typedef void (*gattlib_discovered_device_t)(void *adapter, const char* addr, const char* name, void *user_data)
-gattlib_discovered_device_type = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p, py_object)
+gattlib_discovered_device_type = CFUNCTYPE(
+    None, c_void_p, c_char_p, c_char_p, py_object
+)
 
 # typedef void (*gattlib_discovered_device_with_data_t)(void *adapter, const char* addr, const char* name,
 #        gattlib_advertisement_data_t *advertisement_data, size_t advertisement_data_count,
@@ -80,7 +98,9 @@ gattlib_discovered_device_with_data_type = CFUNCTYPE(
 
 # int gattlib_adapter_scan_enable_with_filter(void *adapter, uuid_t **uuid_list, int16_t rssi_threshold, uint32_t enabled_filters,
 #        gattlib_discovered_device_t discovered_device_cb, size_t timeout, void *user_data)
-gattlib_adapter_scan_enable_with_filter = gattlib.gattlib_adapter_scan_enable_with_filter
+gattlib_adapter_scan_enable_with_filter = (
+    gattlib.gattlib_adapter_scan_enable_with_filter
+)
 gattlib_adapter_scan_enable_with_filter.argtypes = [
     c_void_p,
     POINTER(POINTER(GattlibUuid)),
@@ -94,7 +114,11 @@ gattlib_adapter_scan_enable_with_filter.argtypes = [
 # int gattlib_adapter_scan_enable_with_filter(void *adapter, gattlib_discovered_device_t discovered_device_cb,
 # void *user_data)
 gattlib_adapter_scan_enable_async = gattlib.gattlib_adapter_scan_enable_async
-gattlib_adapter_scan_enable_async.argtypes = [c_void_p, gattlib_discovered_device_type, py_object]
+gattlib_adapter_scan_enable_async.argtypes = [
+    c_void_p,
+    gattlib_discovered_device_type,
+    py_object,
+]
 
 # int gattlib_adapter_scan_disable_async(void* adapter);
 gattlib_adapter_scan_disable_async = gattlib.gattlib_adapter_scan_disable_async
@@ -115,7 +139,7 @@ gattlib_adapter_scan_eddystone.argtypes = [
 # gatt_connection_t *gattlib_connect(const char *src, const char *dst, unsigned long options);
 gattlib_connect = gattlib.gattlib_connect
 gattlib_connect.restype = c_void_p
-gattlib_connect.argtypes = [c_char_p, c_char_p, c_ulong]
+gattlib_connect.argtypes = [c_void_p, c_char_p, c_ulong]
 
 # int gattlib_disconnect(gatt_connection_t* connection);
 gattlib_disconnect = gattlib.gattlib_disconnect
@@ -123,27 +147,70 @@ gattlib_disconnect.argtypes = [c_void_p]
 
 # int gattlib_discover_primary(gatt_connection_t* connection, gattlib_primary_service_t** services, int* services_count);
 gattlib_discover_primary = gattlib.gattlib_discover_primary
-gattlib_discover_primary.argtypes = [c_void_p, POINTER(POINTER(GattlibPrimaryService)), POINTER(c_int)]
+gattlib_discover_primary.argtypes = [
+    c_void_p,
+    POINTER(POINTER(GattlibPrimaryService)),
+    POINTER(c_int),
+]
 
 # int gattlib_discover_char(gatt_connection_t* connection, gattlib_characteristic_t** characteristics, int* characteristic_count);
 gattlib_discover_char = gattlib.gattlib_discover_char
-gattlib_discover_char.argtypes = [c_void_p, POINTER(POINTER(GattlibCharacteristic)), POINTER(c_int)]
+gattlib_discover_char.argtypes = [
+    c_void_p,
+    POINTER(POINTER(GattlibCharacteristic)),
+    POINTER(c_int),
+]
+
+# int gattlib_discover_char_range(gatt_connection_t* connection, int start,
+#                                 int end,
+#                                 gattlib_characteristic_t** characteristics,
+#                                 int* characteristics_count);
+gattlib_discover_char_range = gattlib.gattlib_discover_char_range
+gattlib_discover_char_range.argtypes = [
+    c_void_p,
+    c_int,
+    c_int,
+    POINTER(POINTER(GattlibCharacteristic)),
+    POINTER(c_int),
+]
 
 # int gattlib_read_char_by_uuid(gatt_connection_t* connection, uuid_t* uuid, void** buffer, size_t* buffer_len);
 gattlib_read_char_by_uuid = gattlib.gattlib_read_char_by_uuid
-gattlib_read_char_by_uuid.argtypes = [c_void_p, POINTER(GattlibUuid), POINTER(c_void_p), POINTER(c_size_t)]
+gattlib_read_char_by_uuid.argtypes = [
+    c_void_p,
+    POINTER(GattlibUuid),
+    POINTER(c_void_p),
+    POINTER(c_size_t),
+]
 
 # int gattlib_write_char_by_uuid(gatt_connection_t* connection, uuid_t* uuid, const void* buffer, size_t buffer_len)
 gattlib_write_char_by_uuid = gattlib.gattlib_write_char_by_uuid
-gattlib_write_char_by_uuid.argtypes = [c_void_p, POINTER(GattlibUuid), c_void_p, c_size_t]
+gattlib_write_char_by_uuid.argtypes = [
+    c_void_p,
+    POINTER(GattlibUuid),
+    c_void_p,
+    c_size_t,
+]
 
 # int gattlib_write_without_response_char_by_uuid(gatt_connection_t* connection, uuid_t* uuid, const void* buffer, size_t buffer_len)
-gattlib_write_without_response_char_by_uuid = gattlib.gattlib_write_without_response_char_by_uuid
-gattlib_write_without_response_char_by_uuid.argtypes = [c_void_p, POINTER(GattlibUuid), c_void_p, c_size_t]
+gattlib_write_without_response_char_by_uuid = (
+    gattlib.gattlib_write_without_response_char_by_uuid
+)
+gattlib_write_without_response_char_by_uuid.argtypes = [
+    c_void_p,
+    POINTER(GattlibUuid),
+    c_void_p,
+    c_size_t,
+]
 
 # int gattlib_write_char_by_uuid_stream_open(gatt_connection_t* connection, uuid_t* uuid, gatt_stream_t **stream, uint16_t *mtu)
 gattlib_write_char_by_uuid_stream_open = gattlib.gattlib_write_char_by_uuid_stream_open
-gattlib_write_char_by_uuid_stream_open.argtypes = [c_void_p, POINTER(GattlibUuid), POINTER(c_void_p), POINTER(c_uint16)]
+gattlib_write_char_by_uuid_stream_open.argtypes = [
+    c_void_p,
+    POINTER(GattlibUuid),
+    POINTER(c_void_p),
+    POINTER(c_uint16),
+]
 
 # int gattlib_notification_start(gatt_connection_t* connection, const uuid_t* uuid);
 gattlib_notification_start = gattlib.gattlib_notification_start
@@ -186,7 +253,9 @@ gattlib_get_advertisement_data.argtypes = [
 # int gattlib_get_advertisement_data_from_mac(void *adapter, const char *mac_address,
 #        gattlib_advertisement_data_t **advertisement_data, size_t *advertisement_data_length,
 #        uint16_t *manufacturer_id, uint8_t **manufacturer_data, size_t *manufacturer_data_size)
-gattlib_get_advertisement_data_from_mac = gattlib.gattlib_get_advertisement_data_from_mac
+gattlib_get_advertisement_data_from_mac = (
+    gattlib.gattlib_get_advertisement_data_from_mac
+)
 gattlib_get_advertisement_data_from_mac.argtypes = [
     c_void_p,
     c_char_p,
@@ -201,4 +270,12 @@ gattlib_get_uuids = gattlib.gattlib_get_uuids
 gattlib_get_uuids.argtypes = [c_void_p, POINTER(POINTER(c_char_p)), POINTER(c_size_t)]
 
 gattlib_get_uuids_from_mac = gattlib.gattlib_get_uuids_from_mac
-gattlib_get_uuids_from_mac.argtypes = [c_void_p, c_char_p, POINTER(POINTER(c_char_p)), POINTER(c_size_t)]
+gattlib_get_uuids_from_mac.argtypes = [
+    c_void_p,
+    c_char_p,
+    POINTER(POINTER(c_char_p)),
+    POINTER(c_size_t),
+]
+
+gattlib_string_to_uuid = gattlib.gattlib_string_to_uuid
+gattlib_string_to_uuid.argtypes = [c_char_p, c_size_t, POINTER(GattlibUuid)]

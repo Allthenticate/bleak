@@ -7,7 +7,9 @@ import asyncio
 import os
 import re
 import subprocess
+import uuid
 import warnings
+from ctypes import c_int, c_ubyte, cast, c_void_p, c_char, c_uint16, c_byte
 from typing import Any, Callable, Dict, List, Optional, Union
 from uuid import UUID
 
@@ -23,6 +25,38 @@ from bleak.backends.bluezdbus.scanner import BleakScannerBlueZDBus
 from bleak.backends.bluezdbus.service import BleakGATTServiceBlueZDBus
 from bleak.backends.bluezdbus.signals import MatchRules, add_match, remove_match
 from bleak.backends.bluezdbus.utils import assert_reply, unpack_variants
+from bleak.backends.bluezgattlib import (
+    gattlib_connect,
+    gattlib_disconnect,
+    POINTER,
+    c_char_p,
+    c_size_t,
+    gattlib_get_uuids_from_mac,
+    byref,
+    gattlib_get_uuids,
+    GattlibPrimaryService,
+    gattlib_discover_primary,
+    gattlib_discover_char,
+    GattlibCharacteristic,
+    gattlib_read_char_by_uuid,
+    gattlib_write_char_by_uuid,
+    gattlib_write_without_response_char_by_uuid,
+    GattlibAdvertisementData,
+    gattlib_get_advertisement_data_from_mac,
+    gattlib_get_advertisement_data,
+    gattlib_discover_char_range,
+    GattlibUuid,
+    GattlibUuidTypes,
+    GattlibUuidValue,
+    gattlib_string_to_uuid,
+)
+from bleak.backends.bluezgattlib.characteristic import (
+    BleakGATTCharacteristicBlueZGattlib,
+)
+from bleak.backends.bluezgattlib.exception import handle_return
+from bleak.backends.bluezgattlib.gatt import GattCharacteristic, GattService
+from bleak.backends.bluezgattlib.service import BleakGATTServiceBlueZGattlib
+from bleak.backends.bluezgattlib.uuid import gattlib_uuid_to_int
 from bleak.backends.client import BaseBleakClient
 from bleak.backends.device import BLEDevice
 from bleak.backends.service import BleakGATTServiceCollection
@@ -30,6 +64,18 @@ from bleak.exc import BleakDBusError, BleakError
 
 
 logger = logging.getLogger(__name__)
+
+# BLE constants
+CONNECTION_OPTIONS_LEGACY_BDADDR_LE_PUBLIC = 1 << 0
+CONNECTION_OPTIONS_LEGACY_BDADDR_LE_RANDOM = 1 << 1
+CONNECTION_OPTIONS_LEGACY_BT_SEC_LOW = 1 << 2
+CONNECTION_OPTIONS_LEGACY_BT_SEC_MEDIUM = 1 << 3
+CONNECTION_OPTIONS_LEGACY_BT_SEC_HIGH = 1 << 4
+CONNECTION_OPTIONS_LEGACY_DEFAULT = (
+    CONNECTION_OPTIONS_LEGACY_BDADDR_LE_PUBLIC
+    | CONNECTION_OPTIONS_LEGACY_BDADDR_LE_RANDOM
+    | CONNECTION_OPTIONS_LEGACY_BT_SEC_LOW
+)
 
 
 class BleakClientBlueZGattlib(BaseBleakClient):
@@ -49,499 +95,68 @@ class BleakClientBlueZGattlib(BaseBleakClient):
     """
 
     def __init__(self, address_or_ble_device: Union[BLEDevice, str], **kwargs):
-        super(BleakClientBlueZDBus, self).__init__(address_or_ble_device, **kwargs)
+        super(BleakClientBlueZGattlib, self).__init__(address_or_ble_device, **kwargs)
         # kwarg "device" is for backwards compatibility
-        self._adapter = kwargs.get("adapter", kwargs.get("device", "hci0"))
+        self._adapter_name = kwargs.get("adapter", kwargs.get("device", "hci0"))
+        self._adapter = None
 
-        # Backend specific, D-Bus objects and data
+        # Extract address from BLEDevice
         if isinstance(address_or_ble_device, BLEDevice):
-            self._device_path = address_or_ble_device.details["path"]
-            self._device_info = address_or_ble_device.details.get("props")
+            self._address = address_or_ble_device.address
+            self._adapter = address_or_ble_device.metadata["adapter"]
+        # Encode our string to make sure we can send it to the ctypes properly
+        elif type(address_or_ble_device) == str:
+            self._address = address_or_ble_device
         else:
-            self._device_path = None
-            self._device_info = None
+            raise BleakError(
+                f"Argument 'address_or_ble_device' must be BLEDevice or str, got {type(address_or_ble_device)}."
+            )
 
-        # D-Bus message bus
-        self._bus: Optional[MessageBus] = None
-        # match rules we are subscribed to that need to be removed on disconnect
-        self._rules: List[MatchRules] = []
-        # D-Bus properties for the device
-        self._properties: Dict[str, Any] = {}
-        # list of characteristic handles that have notifications enabled
-        self._subscriptions: List[int] = []
-        # provides synchronization between get_services() and PropertiesChanged signal
-        self._services_resolved_event: Optional[asyncio.Event] = None
-        # indicates disconnect request in progress when not None
-        self._disconnecting_event: Optional[asyncio.Event] = None
-        # used to ensure device gets disconnected if event loop crashes
-        self._disconnect_monitor_event: Optional[asyncio.Event] = None
+        self._address_encoded = self._address.encode("utf-8")
 
-        # get BlueZ version
-        p = subprocess.Popen(["bluetoothctl", "--version"], stdout=subprocess.PIPE)
-        out, _ = p.communicate()
-        s = re.search(b"(\\d+).(\\d+)", out.strip(b"'"))
-        bluez_version = tuple(map(int, s.groups()))
-
-        # BlueZ version features
-        self._can_write_without_response = (
-            bluez_version[0] == 5 and bluez_version[1] >= 46
-        )
-        self._write_without_response_workaround_needed = (
-            bluez_version[0] == 5 and bluez_version[1] < 51
-        )
-        self._hides_battery_characteristic = self._hides_device_name_characteristic = (
-            bluez_version[0] == 5 and bluez_version[1] >= 48
-        )
+        # Connection variables
+        self._connection = None
 
     # Connectivity methods
 
-    async def connect(self, **kwargs) -> bool:
-        """Connect to the specified GATT server.
+    async def connect(
+        self, options=CONNECTION_OPTIONS_LEGACY_DEFAULT, **kwargs
+    ) -> bool:
+        """Connect to the specified GATT server."""
+        logger.debug(f"Connecting to device @ {self.address} with {self._adapter_name}")
 
-        Keyword Args:
-            timeout (float): Timeout for required ``BleakScanner.find_device_by_address`` call. Defaults to 10.0.
+        # Must encode as utf-8 to be a char * in C
+        self._connection = gattlib_connect(
+            self._adapter, self._address_encoded, options
+        )
+        if self._connection is None:
+            raise BleakError("Connection failed.")
 
-        Returns:
-            Boolean representing connection status.
+        logger.debug(f"Connected to {self.address}")
 
-        Raises:
-            BleakError: If the device is already connected or if the device could not be found.
-            BleakDBusError: If there was a D-Bus error
-            asyncio.TimeoutError: If the connection timed out
-        """
-        if self.address is None:
-            raise BleakError("Tried to connect to address 'None'")
-
-        logger.debug(f"Connecting to device @ {self.address} with {self._adapter}")
-
-        if self.is_connected:
-            raise BleakError("Client is already connected")
-
-        # A Discover must have been run before connecting to any devices.
-        # Find the desired device before trying to connect.
-        timeout = kwargs.get("timeout", self._timeout)
-        if self._device_path is None:
-            device = await BleakScannerBlueZDBus.find_device_by_address(
-                self.address, timeout=timeout, adapter=self._adapter
-            )
-
-            if device:
-                self._device_info = device.details.get("props")
-                self._device_path = device.details["path"]
-            else:
-                raise BleakError(
-                    "Device with address {0} was not found.".format(self.address)
-                )
-
-        # Create system bus
-        self._bus = await MessageBus(
-            bus_type=BusType.SYSTEM,
-            negotiate_unix_fd=self._write_without_response_workaround_needed,
-        ).connect()
-
-        try:
-            # Add signal handlers. These monitor the device D-Bus object and
-            # all of its descendats (services, characteristics, descriptors).
-            # This we always have an up-to-date state for all of these that is
-            # maintained automatically in the background.
-
-            self._bus.add_message_handler(self._parse_msg)
-
-            rules = MatchRules(
-                interface=defs.OBJECT_MANAGER_INTERFACE,
-                member="InterfacesAdded",
-                arg0path=f"{self._device_path}/",
-            )
-            reply = await add_match(self._bus, rules)
-            assert_reply(reply)
-            self._rules.append(rules)
-
-            rules = MatchRules(
-                interface=defs.OBJECT_MANAGER_INTERFACE,
-                member="InterfacesRemoved",
-                arg0path=f"{self._device_path}/",
-            )
-            reply = await add_match(self._bus, rules)
-            assert_reply(reply)
-            self._rules.append(rules)
-
-            rules = MatchRules(
-                interface=defs.PROPERTIES_INTERFACE,
-                member="PropertiesChanged",
-                path_namespace=self._device_path,
-            )
-            reply = await add_match(self._bus, rules)
-            assert_reply(reply)
-            self._rules.append(rules)
-
-            # Find the HCI device to use for scanning and get cached device properties
-            reply = await self._bus.call(
-                Message(
-                    destination=defs.BLUEZ_SERVICE,
-                    path="/",
-                    member="GetManagedObjects",
-                    interface=defs.OBJECT_MANAGER_INTERFACE,
-                )
-            )
-            assert_reply(reply)
-
-            interfaces_and_props: Dict[str, Dict[str, Variant]] = reply.body[0]
-
-            # The device may have been removed from BlueZ since the time we stopped scanning
-            if self._device_path not in interfaces_and_props:
-                # Sometimes devices can be removed from the BlueZ object manager
-                # before we connect to them. In this case we try using the
-                # org.bluez.Adapter1.ConnectDevice method instead. This method
-                # requires that bluetoothd is run with the --experimental flag
-                # and is available since BlueZ 5.49.
-                logger.debug(
-                    f"org.bluez.Device1 object not found, trying org.bluez.Adapter1.ConnectDevice ({self._device_path})"
-                )
-                reply = await asyncio.wait_for(
-                    self._bus.call(
-                        Message(
-                            destination=defs.BLUEZ_SERVICE,
-                            interface=defs.ADAPTER_INTERFACE,
-                            path=f"/org/bluez/{self._adapter}",
-                            member="ConnectDevice",
-                            signature="a{sv}",
-                            body=[
-                                {
-                                    "Address": Variant(
-                                        "s", self._device_info["Address"]
-                                    ),
-                                    "AddressType": Variant(
-                                        "s", self._device_info["AddressType"]
-                                    ),
-                                }
-                            ],
-                        )
-                    ),
-                    timeout,
-                )
-
-                # FIXME: how to cancel connection if timeout?
-
-                if (
-                    reply.message_type == MessageType.ERROR
-                    and reply.error_name == ErrorType.UNKNOWN_METHOD.value
-                ):
-                    logger.debug(
-                        f"org.bluez.Adapter1.ConnectDevice not found ({self._device_path}), try enabling bluetoothd --experimental"
-                    )
-                    raise BleakError(
-                        "Device with address {0} could not be found. "
-                        "Try increasing `timeout` value or moving the device closer.".format(
-                            self.address
-                        )
-                    )
-
-                assert_reply(reply)
-            else:
-                # required interface
-                self._properties = unpack_variants(
-                    interfaces_and_props[self._device_path][defs.DEVICE_INTERFACE]
-                )
-
-                # optional interfaces - services and characteristics may not
-                # be populated yet
-                for path, interfaces in interfaces_and_props.items():
-                    if not path.startswith(self._device_path):
-                        continue
-
-                    if defs.GATT_SERVICE_INTERFACE in interfaces:
-                        obj = unpack_variants(interfaces[defs.GATT_SERVICE_INTERFACE])
-                        self.services.add_service(BleakGATTServiceBlueZDBus(obj, path))
-
-                    if defs.GATT_CHARACTERISTIC_INTERFACE in interfaces:
-                        obj = unpack_variants(
-                            interfaces[defs.GATT_CHARACTERISTIC_INTERFACE]
-                        )
-                        service = interfaces_and_props[obj["Service"]][
-                            defs.GATT_SERVICE_INTERFACE
-                        ]
-                        uuid = service["UUID"].value
-                        self.services.add_characteristic(
-                            BleakGATTCharacteristicBlueZDBus(obj, path, uuid)
-                        )
-
-                    if defs.GATT_DESCRIPTOR_INTERFACE in interfaces:
-                        obj = unpack_variants(
-                            interfaces[defs.GATT_DESCRIPTOR_INTERFACE]
-                        )
-                        characteristic = interfaces_and_props[obj["Characteristic"]][
-                            defs.GATT_CHARACTERISTIC_INTERFACE
-                        ]
-                        uuid = characteristic["UUID"].value
-                        handle = int(obj["Characteristic"][-4:], 16)
-                        self.services.add_descriptor(
-                            BleakGATTDescriptorBlueZDBus(obj, path, uuid, handle)
-                        )
-
-                try:
-                    reply = await asyncio.wait_for(
-                        self._bus.call(
-                            Message(
-                                destination=defs.BLUEZ_SERVICE,
-                                interface=defs.DEVICE_INTERFACE,
-                                path=self._device_path,
-                                member="Connect",
-                            )
-                        ),
-                        timeout,
-                    )
-                    assert_reply(reply)
-                except BaseException:
-                    # calling Disconnect cancels any pending connect request
-                    try:
-                        reply = await self._bus.call(
-                            Message(
-                                destination=defs.BLUEZ_SERVICE,
-                                interface=defs.DEVICE_INTERFACE,
-                                path=self._device_path,
-                                member="Disconnect",
-                            )
-                        )
-                        try:
-                            assert_reply(reply)
-                        except BleakDBusError as e:
-                            # if the object no longer exists, then we know we
-                            # are disconnected for sure, so don't need to log a
-                            # warning about it
-                            if e.dbus_error != ErrorType.UNKNOWN_OBJECT.value:
-                                raise
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to cancel connection ({self._device_path}): {e}"
-                        )
-
-                    raise
-
-            if self.is_connected:
-                logger.debug(f"Connection successful ({self._device_path})")
-            else:
-                raise BleakError(
-                    f"Connection was not successful! ({self._device_path})"
-                )
-
-            # Create a task that runs until the device is disconnected.
-            self._disconnect_monitor_event = asyncio.Event()
-            asyncio.create_task(self._disconnect_monitor())
-
-            # Get all services. This means making the actual connection.
-            await self.get_services()
-
-            return True
-        except BaseException:
-            await self._cleanup_all()
-            raise
-
-    async def _disconnect_monitor(self) -> None:
-        # This task runs until the device is disconnected. If the task is
-        # cancelled, it probably means that the event loop crashed so we
-        # try to disconnected the device. Otherwise BlueZ will keep the device
-        # connected even after Python exits. This will only work if the event
-        # loop is called with asyncio.run() or otherwise runs pending tasks
-        # after the original event loop stops. This will also cause an exception
-        # if a run loop is stopped before the device is disconnected since this
-        # task will still be running and asyncio compains if a loop with running
-        # tasks is stopped.
-        try:
-            await self._disconnect_monitor_event.wait()
-        except asyncio.CancelledError:
-            try:
-                # by using send() instead of call(), we ensure that the message
-                # gets sent, but we don't wait for a reply, which could take
-                # over one second while the device disconnects.
-                await self._bus.send(
-                    Message(
-                        destination=defs.BLUEZ_SERVICE,
-                        path=self._device_path,
-                        interface=defs.DEVICE_INTERFACE,
-                        member="Disconnect",
-                    )
-                )
-            except Exception:
-                pass
+        return True
 
     async def _remove_signal_handlers(self) -> None:
         """
         Remove all pending notifications of the client. This method is used to
         free the DBus matches that have been established.
         """
-        logger.debug(f"_remove_signal_handlers({self._device_path})")
-        if self._bus is None:
-            return
-
-        self._bus.remove_message_handler(self._parse_msg)
-
-        # avoid reentrancy issues by taking a copy of self._rules
-        old_rules, self._rules = self._rules, []
-        for rule in old_rules:
-            try:
-                await remove_match(self._bus, rule)
-            except Exception as e:
-                logger.error(
-                    f"Failed to remove match {rule.member} ({self._device_path}): {e}"
-                )
-
-        # avoid reentrancy issues by taking a copy of self._subscriptions
-        old_subscriptions, self._subscriptions = self._subscriptions, []
-        for handle in old_subscriptions:
-            try:
-                await self.stop_notify(handle)
-            except Exception as e:
-                logger.error(
-                    f"Failed to stop notifications on characteristic {handle} ({self._device_path}): {e}"
-                )
-
-    def _disconnect_message_bus(self) -> None:
-        """
-        Free the resources allocated for both the DBus bus.
-        Use this method upon final disconnection.
-        """
-        logger.debug(f"_disconnect_message_bus({self._device_path})")
-
-        if not self._bus:
-            logger.debug(f"already disconnected ({self._device_path})")
-            return
-
-        # Try to disconnect the System Bus.
-        try:
-            self._bus.disconnect()
-        except Exception as e:
-            logger.error(
-                f"Attempt to disconnect system bus failed ({self._device_path}): {e}"
-            )
-        else:
-            # Critical to remove the `self._bus` object here to since it was
-            # closed above. If not, calls made to it later could lead to
-            # a stuck client.
-            self._bus = None
-
-    async def _cleanup_all(self) -> None:
-        """
-        Free all the allocated resource in DBus. Use this method to
-        eventually cleanup all otherwise leaked resources.
-        """
-        await self._remove_signal_handlers()
-        self._disconnect_message_bus()
+        logger.debug(f"_remove_signal_handlers({self._address})")
+        raise NotImplementedError
 
     async def disconnect(self) -> bool:
-        """Disconnect from the specified GATT server.
+        """Disconnect from the specified GATT server."""
+        logger.debug(f"Disconnecting ({self._address})")
 
-        Returns:
-            Boolean representing if device is disconnected.
-
-        Raises:
-            BleakDBusError: If there was a D-Bus error
-            asyncio.TimeoutError if the device was not disconnected within 10 seconds
-        """
-        logger.debug(f"Disconnecting ({self._device_path})")
-
-        if self._bus is None:
-            # No connection exists. Either one hasn't been created or
-            # we have already called disconnect and closed the D-Bus
-            # connection.
-            logger.debug(f"already disconnected ({self._device_path})")
-            return True
-
-        if self._disconnecting_event:
-            # another call to disconnect() is already in progress
-            logger.debug(f"already in progress ({self._device_path})")
-            await asyncio.wait_for(self._disconnecting_event.wait(), timeout=10)
-        elif self.is_connected:
-            self._disconnecting_event = asyncio.Event()
-            try:
-                # Try to disconnect the actual device/peripheral
-                reply = await self._bus.call(
-                    Message(
-                        destination=defs.BLUEZ_SERVICE,
-                        path=self._device_path,
-                        interface=defs.DEVICE_INTERFACE,
-                        member="Disconnect",
-                    )
-                )
-                assert_reply(reply)
-                await asyncio.wait_for(self._disconnecting_event.wait(), timeout=10)
-            finally:
-                self._disconnecting_event = None
-
-        # sanity check to make sure _cleanup_all() was triggered by the
-        # "PropertiesChanged" signal handler and that it completed successfully
-        assert self._bus is None
-
-        # Reset all stored services.
-        self.services = BleakGATTServiceCollection()
-        self._services_resolved = False
-
-        return True
+        if self._connection is not None:
+            ret = gattlib_disconnect(self._connection)
+            handle_return(ret)
+            return ret == 0
+        return False
 
     async def pair(self, *args, **kwargs) -> bool:
-        """Pair with the peripheral.
-
-        You can use ConnectDevice method if you already know the MAC address of the device.
-        Else you need to StartDiscovery, Trust, Pair and Connect in sequence.
-
-        Returns:
-            Boolean regarding success of pairing.
-
-        """
-        # See if it is already paired.
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=self._device_path,
-                interface=defs.PROPERTIES_INTERFACE,
-                member="Get",
-                signature="ss",
-                body=[defs.DEVICE_INTERFACE, "Paired"],
-            )
-        )
-        assert_reply(reply)
-        if reply.body[0]:
-            return True
-
-        # Set device as trusted.
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=self._device_path,
-                interface=defs.PROPERTIES_INTERFACE,
-                member="Set",
-                signature="ssv",
-                body=[defs.DEVICE_INTERFACE, "Trusted", True],
-            )
-        )
-        assert_reply(reply)
-
-        logger.debug(
-            "Pairing to BLE device @ {0} with {1}".format(self.address, self._adapter)
-        )
-
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=self._device_path,
-                interface=defs.DEVICE_INTERFACE,
-                member="Pair",
-            )
-        )
-        assert_reply(reply)
-
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=self._device_path,
-                interface=defs.PROPERTIES_INTERFACE,
-                member="Get",
-                signature="ss",
-                body=[defs.DEVICE_INTERFACE, "Paired"],
-            )
-        )
-        assert_reply(reply)
-
-        return reply.body[0]
+        """Pair with the peripheral."""
+        raise NotImplementedError
 
     async def unpair(self) -> bool:
         """Unpair with the peripheral.
@@ -550,10 +165,7 @@ class BleakClientBlueZGattlib(BaseBleakClient):
             Boolean regarding success of unpairing.
 
         """
-        warnings.warn(
-            "Unpairing is seemingly unavailable in the BlueZ DBus API at the moment."
-        )
-        return False
+        raise NotImplementedError
 
     @property
     def is_connected(self) -> bool:
@@ -563,10 +175,7 @@ class BleakClientBlueZGattlib(BaseBleakClient):
             Boolean representing connection status.
 
         """
-        if not self._bus:
-            return False
-
-        return self._properties.get("Connected", False)
+        return self._connection == None
 
     # GATT services methods
 
@@ -576,18 +185,65 @@ class BleakClientBlueZGattlib(BaseBleakClient):
         Returns:
            A :py:class:`bleak.backends.service.BleakGATTServiceCollection` with this device's services tree.
 
+        TODO: Convert everything to Bleak objects
         """
         if self._services_resolved:
             return self.services
 
-        if not self._properties["ServicesResolved"]:
-            logger.debug(f"Waiting for ServicesResolved ({self._device_path})")
-            self._services_resolved_event = asyncio.Event()
-            try:
-                await asyncio.wait_for(self._services_resolved_event.wait(), 5)
-            finally:
-                self._services_resolved_event = None
+        # Get all of our services
+        _services = POINTER(GattlibPrimaryService)()
+        _services_count = c_int(0)
+        ret = gattlib_discover_primary(
+            self._connection, byref(_services), byref(_services_count)
+        )
+        handle_return(ret)
+        if ret != 0:
+            logger.error("Failed to retrieve service UUIDs")
 
+        # Add our services to our list
+        for i in range(0, _services_count.value):
+            # service = GattService(self, _services[i])
+            service = BleakGATTServiceBlueZGattlib(_services[i])
+            self.services.add_service(service)
+            logging.debug(
+                "Service UUID: %s (%d,%d)"
+                % (
+                    service.uuid,
+                    _services[i].attr_handle_start,
+                    _services[i].attr_handle_end,
+                )
+            )
+
+        # Get all of our characteristics
+        _characteristics = POINTER(GattlibCharacteristic)()
+        _characteristics_count = c_int(0)
+        ret = gattlib_discover_char(
+            self._connection,
+            byref(_characteristics),
+            byref(_characteristics_count),
+        )
+        handle_return(ret)
+        if ret != 0:
+            logger.error("Failed to retrieve characteristics")
+
+        # Figure out which characteristics go with which services
+        for i in range(0, _characteristics_count.value):
+            characteristic = BleakGATTCharacteristicBlueZGattlib(_characteristics[i])
+
+            logging.debug(
+                "Characteristic UUID: %s (%d)"
+                % (characteristic.uuid, characteristic.handle)
+            )
+            added = False
+            for s in self.services:
+                if s.add_characteristic(characteristic):
+                    characteristic.add_service_uuid(s.uuid)
+                    added = True
+            if not added:
+                logger.warning(
+                    "Characteristic was not associated with any service. (%s,%d)"
+                    % (characteristic.uuid, characteristic.handle)
+                )
         self._services_resolved = True
         return self.services
 
@@ -595,7 +251,7 @@ class BleakClientBlueZGattlib(BaseBleakClient):
 
     async def read_gatt_char(
         self,
-        char_specifier: Union[BleakGATTCharacteristicBlueZDBus, int, str, UUID],
+        char_specifier: Union[BleakGATTCharacteristicBlueZGattlib, int, str, UUID],
         timeout: int = 1,
         **kwargs,
     ) -> bytearray:
@@ -611,79 +267,42 @@ class BleakClientBlueZGattlib(BaseBleakClient):
             (bytearray) The read data.
 
         """
-        if self._bus is None:
-            raise BleakError("D-Bus object is None")
+        _buffer = c_void_p(None)
+        _buffer_len = c_size_t(0)
 
-        if not isinstance(char_specifier, BleakGATTCharacteristicBlueZDBus):
-            characteristic = self.services.get_characteristic(char_specifier)
+        char_uuid = None
+        if isinstance(char_specifier, BleakGATTCharacteristicBlueZGattlib):
+            char_uuid = char_specifier._gattlib_characteristic.uuid
+        elif isinstance(char_specifier, UUID):
+            gattlib_uuid = GattlibUuid()
+
+            uuid_ascii = str(char_specifier).encode("utf-8")
+            ret = gattlib_string_to_uuid(
+                uuid_ascii, len(uuid_ascii), byref(gattlib_uuid)
+            )
+            handle_return(ret)
+            char_uuid = gattlib_uuid
+            # char_uuid = GattlibUuid()
+            # char_uuid.type = GattlibUuidTypes.BT_UUID128
+            # char_uuid_value = GattlibUuidValue
+            # char_uuid_value.uuid128 = char_specifier.bytes
+            # char_uuid.value.uuid128 = char_specifier.bytes
         else:
-            characteristic = char_specifier
-
-        if not characteristic:
-            # Special handling for BlueZ >= 5.48, where Battery Service (0000180f-0000-1000-8000-00805f9b34fb:)
-            # has been moved to interface org.bluez.Battery1 instead of as a regular service.
-            if str(char_specifier) == "00002a19-0000-1000-8000-00805f9b34fb" and (
-                self._hides_battery_characteristic
-            ):
-                reply = await self._bus.call(
-                    Message(
-                        destination=defs.BLUEZ_SERVICE,
-                        path=self._device_path,
-                        interface=defs.PROPERTIES_INTERFACE,
-                        member="GetAll",
-                        signature="s",
-                        body=[defs.BATTERY_INTERFACE],
-                    )
-                )
-                assert_reply(reply)
-                # Simulate regular characteristics read to be consistent over all platforms.
-                value = bytearray(reply.body[0]["Percentage"].value)
-                logger.debug(
-                    "Read Battery Level {0} | {1}: {2}".format(
-                        char_specifier, self._device_path, value
-                    )
-                )
-                return value
-            if str(char_specifier) == "00002a00-0000-1000-8000-00805f9b34fb" and (
-                self._hides_device_name_characteristic
-            ):
-                # Simulate regular characteristics read to be consistent over all platforms.
-                value = bytearray(self._properties["Name"].encode("ascii"))
-                logger.debug(
-                    "Read Device Name {0} | {1}: {2}".format(
-                        char_specifier, self._device_path, value
-                    )
-                )
-                return value
-
             raise BleakError(
-                "Characteristic with UUID {0} could not be found!".format(
-                    char_specifier
-                )
+                f"{type(char_specifier)} not currently supported for char_specifier"
             )
-
-        reply = await asyncio.wait_for(
-            self._bus.call(
-                Message(
-                    destination=defs.BLUEZ_SERVICE,
-                    path=characteristic.path,
-                    interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                    member="ReadValue",
-                    signature="a{sv}",
-                    body=[{}],
-                ),
-            ),
-            timeout,
+        ret = gattlib_read_char_by_uuid(
+            self._connection, char_uuid, byref(_buffer), byref(_buffer_len)
         )
-        assert_reply(reply)
-        value = bytearray(reply.body[0])
 
-        logger.debug(
-            "Read Characteristic {0} | {1}: {2}".format(
-                characteristic.uuid, characteristic.path, value
-            )
-        )
-        return value
+        pointer_type = POINTER(c_ubyte * _buffer_len.value)
+        c_bytearray = cast(_buffer, pointer_type)
+
+        value = bytearray(_buffer_len.value)
+        for i in range(_buffer_len.value):
+            value[i] = c_bytearray.contents[i]
+
+        return bytes(value)
 
     async def read_gatt_descriptor(self, handle: int, **kwargs) -> bytearray:
         """Perform read operation on the specified GATT descriptor.
@@ -695,27 +314,7 @@ class BleakClientBlueZGattlib(BaseBleakClient):
             (bytearray) The read data.
 
         """
-        descriptor = self.services.get_descriptor(handle)
-        if not descriptor:
-            raise BleakError("Descriptor with handle {0} was not found!".format(handle))
-
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=descriptor.path,
-                interface=defs.GATT_DESCRIPTOR_INTERFACE,
-                member="ReadValue",
-                signature="a{sv}",
-                body=[{}],
-            )
-        )
-        assert_reply(reply)
-        value = bytearray(reply.body[0])
-
-        logger.debug(
-            "Read Descriptor {0} | {1}: {2}".format(handle, descriptor.path, value)
-        )
-        return value
+        raise NotImplementedError
 
     async def write_gatt_char(
         self,
@@ -744,80 +343,33 @@ class BleakClientBlueZGattlib(BaseBleakClient):
             response (bool): If write-with-response operation should be done. Defaults to `False`.
 
         """
-        if not isinstance(char_specifier, BleakGATTCharacteristicBlueZDBus):
-            characteristic = self.services.get_characteristic(char_specifier)
+        # if not isinstance(char_specifier, BleakGATTCharacteristicBlueZDBus):
+        #     characteristic = self.services.get_characteristic(char_specifier)
+        # else:
+        #     characteristic = char_specifier
+
+        if not isinstance(data, bytes) and not isinstance(data, bytearray):
+            raise TypeError("Data must be of bytes type to know its size.")
+
+        buffer_type = c_char * len(data)
+        buffer = data
+        buffer_len = len(data)
+
+        if response:
+            ret = gattlib_write_char_by_uuid(
+                self._connection,
+                char_specifier,
+                buffer_type.from_buffer_copy(buffer),
+                buffer_len,
+            )
         else:
-            characteristic = char_specifier
-
-        if not characteristic:
-            raise BleakError("Characteristic {0} was not found!".format(char_specifier))
-        if (
-            "write" not in characteristic.properties
-            and "write-without-response" not in characteristic.properties
-        ):
-            raise BleakError(
-                "Characteristic %s does not support write operations!"
-                % str(characteristic.uuid)
+            ret = gattlib_write_without_response_char_by_uuid(
+                self._connection,
+                char_specifier,
+                buffer_type.from_buffer_copy(buffer),
+                buffer_len,
             )
-        if not response and "write-without-response" not in characteristic.properties:
-            response = True
-            # Force response here, since the device only supports that.
-        if (
-            response
-            and "write" not in characteristic.properties
-            and "write-without-response" in characteristic.properties
-        ):
-            response = False
-            logger.warning(
-                "Characteristic %s does not support Write with response. Trying without..."
-                % str(characteristic.uuid)
-            )
-
-        # See docstring for details about this handling.
-        if not response and not self._can_write_without_response:
-            raise BleakError("Write without response requires at least BlueZ 5.46")
-        if response or not self._write_without_response_workaround_needed:
-            # TODO: Add OnValueUpdated handler for response=True?
-            reply = await self._bus.call(
-                Message(
-                    destination=defs.BLUEZ_SERVICE,
-                    path=characteristic.path,
-                    interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                    member="WriteValue",
-                    signature="aya{sv}",
-                    body=[
-                        bytes(data),
-                        {"type": Variant("s", "request" if response else "command")},
-                    ],
-                )
-            )
-            assert_reply(reply)
-        else:
-            # Older versions of BlueZ don't have the "type" option, so we have
-            # to write the hard way. This isn't the most efficient way of doing
-            # things, but it works.
-            reply = await self._bus.call(
-                Message(
-                    destination=defs.BLUEZ_SERVICE,
-                    path=characteristic.path,
-                    interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                    member="AcquireWrite",
-                    signature="a{sv}",
-                    body=[{}],
-                )
-            )
-            assert_reply(reply)
-            fd = reply.body[0]
-            try:
-                os.write(fd, data)
-            finally:
-                os.close(fd)
-
-        logger.debug(
-            "Write Characteristic {0} | {1}: {2}".format(
-                characteristic.uuid, characteristic.path, data
-            )
-        )
+        handle_return(ret)
 
     async def write_gatt_descriptor(self, handle: int, data: bytearray) -> None:
         """Perform a write operation on the specified GATT descriptor.
@@ -827,25 +379,7 @@ class BleakClientBlueZGattlib(BaseBleakClient):
             data (bytes or bytearray): The data to send.
 
         """
-        descriptor = self.services.get_descriptor(handle)
-        if not descriptor:
-            raise BleakError("Descriptor with handle {0} was not found!".format(handle))
-
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=descriptor.path,
-                interface=defs.GATT_DESCRIPTOR_INTERFACE,
-                member="WriteValue",
-                signature="aya{sv}",
-                body=[bytes(data), {"type": Variant("s", "command")}],
-            )
-        )
-        assert_reply(reply)
-
-        logger.debug(
-            "Write Descriptor {0} | {1}: {2}".format(handle, descriptor.path, data)
-        )
+        raise NotImplementedError
 
     async def start_notify(
         self,
@@ -875,39 +409,8 @@ class BleakClientBlueZGattlib(BaseBleakClient):
         else:
             characteristic = char_specifier
 
-        if not characteristic:
-            # Special handling for BlueZ >= 5.48, where Battery Service (0000180f-0000-1000-8000-00805f9b34fb:)
-            # has been moved to interface org.bluez.Battery1 instead of as a regular service.
-            # The org.bluez.Battery1 on the other hand does not provide a notification method, so here we cannot
-            # provide this functionality...
-            # See https://kernel.googlesource.com/pub/scm/bluetooth/bluez/+/refs/tags/5.48/doc/battery-api.txt
-            if str(char_specifier) == "00002a19-0000-1000-8000-00805f9b34fb" and (
-                self._hides_battery_characteristic
-            ):
-                raise BleakError(
-                    "Notifications on Battery Level Char ({0}) is not "
-                    "possible in BlueZ >= 5.48. Use regular read instead.".format(
-                        char_specifier
-                    )
-                )
-            raise BleakError(
-                "Characteristic with UUID {0} could not be found!".format(
-                    char_specifier
-                )
-            )
-
-        self._notification_callbacks[characteristic.path] = callback
-        self._subscriptions.append(characteristic.handle)
-
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=characteristic.path,
-                interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                member="StartNotify",
-            )
-        )
-        assert_reply(reply)
+        return True
+        # raise NotImplementedError
 
     async def stop_notify(
         self,
@@ -928,19 +431,7 @@ class BleakClientBlueZGattlib(BaseBleakClient):
         if not characteristic:
             raise BleakError("Characteristic {} not found!".format(char_specifier))
 
-        reply = await self._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=characteristic.path,
-                interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                member="StopNotify",
-            )
-        )
-        assert_reply(reply)
-
-        self._notification_callbacks.pop(characteristic.path, None)
-
-        self._subscriptions.remove(characteristic.handle)
+        raise NotImplementedError
 
     # Internal Callbacks
 
